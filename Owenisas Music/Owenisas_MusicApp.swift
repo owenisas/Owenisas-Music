@@ -11,7 +11,18 @@ import SwiftUI
 struct Owenisas_MusicApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            TabView{
+                ContentView()
+                    .tabItem {
+                        Image(systemName: "house.fill")
+                        Text("Home")
+                    }
+                DownloadView()
+                    .tabItem {
+                        Image(systemName: "list.bullet.indent")
+                        Text("Download")
+                    }
+            }.tint(.blue)
         }
     }
 }
