@@ -1,8 +1,14 @@
 import SwiftUI
 
+extension Notification.Name {
+    /// Posted by MusicPlayerManager when a track finishes
+    static let audioFinished = Notification.Name("AudioFinished")
+}
+
 struct SongsLibraryView: View {
     @State private var songs: [Song] = []
-    
+    @ObservedObject private var playerManager = MusicPlayerManager.shared
+
     var body: some View {
         NavigationView {
             VStack(spacing: 20) {
@@ -20,36 +26,46 @@ struct SongsLibraryView: View {
             .onAppear {
                 loadSongs()
             }
+            // Listen for the end‑of‑song notification and play the next one
+            .onReceive(NotificationCenter.default.publisher(for: .audioFinished)) { _ in
+                playNextSong()
+            }
         }
     }
-    
-    /// Load songs by enumerating subfolders within the designated "Songs" folder.
+
+    /// Loads songs from the Documents/Songs folder (no autoplay here)
     func loadSongs() {
         let fileManager = FileManager.default
-        
-        // Get the app's Documents directory.
+
+        // 1. Documents directory
         guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
             print("Documents directory not found")
             return
         }
-        
-        // Define the "Songs" folder inside Documents.
+
+        // 2. Songs folder
         let songsFolderURL = documentsURL.appendingPathComponent("Songs")
-        
-        // Create the Songs folder if it doesn't exist.
         if !fileManager.fileExists(atPath: songsFolderURL.path) {
             do {
-                try fileManager.createDirectory(at: songsFolderURL, withIntermediateDirectories: true, attributes: nil)
+                try fileManager.createDirectory(
+                    at: songsFolderURL,
+                    withIntermediateDirectories: true,
+                    attributes: nil
+                )
                 print("Created Songs folder at \(songsFolderURL.path)")
             } catch {
                 print("Could not create Songs folder: \(error)")
                 return
             }
         }
-        
-        // Enumerate subfolders.
+
+        // 3. Enumerate subfolders
         do {
-            let subfolders = try fileManager.contentsOfDirectory(at: songsFolderURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+            let subfolders = try fileManager.contentsOfDirectory(
+                at: songsFolderURL,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
             var loadedSongs: [Song] = []
             for folder in subfolders {
                 var isDir: ObjCBool = false
@@ -59,31 +75,30 @@ struct SongsLibraryView: View {
                     }
                 }
             }
-            
-            // Update the state on the main thread.
+
+            // Update state on main thread
             DispatchQueue.main.async {
                 self.songs = loadedSongs
-                // Autoplay the first song if available and none is playing.
-                if let firstSong = loadedSongs.first, !MusicPlayerManager.shared.isPlaying {
-                    MusicPlayerManager.shared.play(song: firstSong)
-                }
             }
         } catch {
             print("Error enumerating songs folder: \(error)")
         }
     }
-    
-    /// Process a song folder to look for an audio file and a cover image.
+
+    /// Finds audio & cover inside a song folder
     func processSongFolder(_ folderURL: URL) throws -> Song? {
         let fileManager = FileManager.default
-        let contents = try fileManager.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil)
-        
+        let contents = try fileManager.contentsOfDirectory(
+            at: folderURL,
+            includingPropertiesForKeys: nil
+        )
+
         let audioExtensions = ["mp3", "wav", "m4a"]
         let imageExtensions = ["jpg", "jpeg", "png"]
-        
+
         var audioURL: URL?
         var coverURL: URL?
-        
+
         for file in contents {
             let ext = file.pathExtension.lowercased()
             if audioExtensions.contains(ext) {
@@ -92,17 +107,24 @@ struct SongsLibraryView: View {
                 coverURL = file
             }
         }
-        
-        if let audioURL = audioURL, let coverURL = coverURL {
+
+        if let audio = audioURL, let cover = coverURL {
             let title = folderURL.lastPathComponent
-            return Song(title: title, audioFileURL: audioURL, coverImageURL: coverURL)
+            return Song(title: title, audioFileURL: audio, coverImageURL: cover)
         } else {
-            print("Folder \(folderURL.lastPathComponent) is missing an audio file or cover image")
+            print("Folder \(folderURL.lastPathComponent) missing audio or cover")
             return nil
         }
     }
+
+    /// Plays the next song in the list, if any
+    func playNextSong() {
+        guard let current = playerManager.currentSong,
+              let index = songs.firstIndex(where: { $0.id == current.id }),
+              index + 1 < songs.count
+        else { return }
+        let next = songs[index + 1]
+        playerManager.play(song: next)
+    }
 }
 
-#Preview("SongsLibraryView Preview") {
-    SongsLibraryView()
-}

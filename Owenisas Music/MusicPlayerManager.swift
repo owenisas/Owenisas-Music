@@ -1,7 +1,7 @@
 import AVFoundation
 import Combine
 import MediaPlayer
-import SwiftUI  // Required for UIImage
+import UIKit
 
 class MusicPlayerManager: NSObject, ObservableObject {
     static let shared = MusicPlayerManager()
@@ -9,6 +9,8 @@ class MusicPlayerManager: NSObject, ObservableObject {
     private var player: AVAudioPlayer?
     @Published var isPlaying = false
     @Published var currentSong: Song? = nil  // Currently playing song
+    /// Playlist to enable next‐song autoplay
+    private var playlist: [Song] = []
     
     override init() {
         super.init()
@@ -16,7 +18,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
             try AVAudioSession.sharedInstance().setCategory(
                 .playback,
                 mode: .default,
-                options: []  // Use .mixWithOthers if you want to allow other audio
+                options: []  // Use .mixWithOthers to mix with other audio
             )
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
@@ -25,12 +27,17 @@ class MusicPlayerManager: NSObject, ObservableObject {
         setupRemoteCommandCenter()
     }
     
-    func play(song: Song) {
-        stop()  // Stop any ongoing playback.
+    /// Play a song, optionally setting a new playlist for autoplay
+    func play(song: Song, in playlist: [Song]? = nil) {
+        // If a new playlist is provided, replace it
+        if let list = playlist {
+            self.playlist = list
+        }
+        stop()
         currentSong = song
         do {
             player = try AVAudioPlayer(contentsOf: song.audioFileURL)
-            player?.delegate = self  // Set delegate to catch playback finished events.
+            player?.delegate = self
             player?.prepareToPlay()
             player?.play()
             isPlaying = true
@@ -54,69 +61,69 @@ class MusicPlayerManager: NSObject, ObservableObject {
         updateNowPlayingInfo(clear: true)
     }
     
-    // MARK: Remote Command Setup
-    
     private func setupRemoteCommandCenter() {
         let commandCenter = MPRemoteCommandCenter.shared()
-        // Play command
-        commandCenter.playCommand.addTarget { [unowned self] event in
-            if let _ = self.currentSong, !self.isPlaying {
-                self.player?.play()
-                self.isPlaying = true
-                self.updateNowPlayingInfo()
-                return .success
+        commandCenter.playCommand.addTarget { [weak self] _ in
+            guard let self = self,
+                  let _ = self.currentSong,
+                  !self.isPlaying else {
+                return .commandFailed
             }
-            return .commandFailed
+            self.player?.play()
+            self.isPlaying = true
+            self.updateNowPlayingInfo()
+            return .success
         }
-        // Pause command
-        commandCenter.pauseCommand.addTarget { [unowned self] event in
-            if self.isPlaying {
-                self.player?.pause()
-                self.isPlaying = false
-                self.updateNowPlayingInfo()
-                return .success
+        commandCenter.pauseCommand.addTarget { [weak self] _ in
+            guard let self = self,
+                  self.isPlaying else {
+                return .commandFailed
             }
-            return .commandFailed
+            self.player?.pause()
+            self.isPlaying = false
+            self.updateNowPlayingInfo()
+            return .success
         }
     }
-    
-    // MARK: Now Playing Info
     
     private func updateNowPlayingInfo(clear: Bool = false) {
         if clear {
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
             return
         }
-        
-        guard let song = currentSong, let player = player else {
+        guard let song = currentSong,
+              let player = player else {
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
             return
         }
-        
         var nowPlayingInfo: [String: Any] = [
             MPMediaItemPropertyTitle: song.title,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: player.currentTime,
             MPMediaItemPropertyPlaybackDuration: player.duration,
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0
         ]
-        
-        // Add artwork if available.
         if let image = UIImage(contentsOfFile: song.coverImageURL.path) {
-            let artwork = MPMediaItemArtwork(boundsSize: image.size) { size in
-                return image
-            }
+            let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
             nowPlayingInfo[MPMediaItemPropertyArtwork] = artwork
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
     }
 }
 
-// MARK: - AVAudioPlayerDelegate
-
 extension MusicPlayerManager: AVAudioPlayerDelegate {
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        print("Finished playing")
-        // Optionally you can implement auto-advance functionality here.
-        updateNowPlayingInfo(clear: true)
+        // Autoplay next song in playlist
+        if let current = currentSong,
+           let index = playlist.firstIndex(where: { $0.id == current.id }),
+           playlist.indices.contains(index + 1) {
+            let nextSong = playlist[index + 1]
+            play(song: nextSong)  // continues autoplay
+        } else {
+            // No next song: clear info
+            updateNowPlayingInfo(clear: true)
+            isPlaying = false
+            currentSong = nil
+        }
     }
 }
+
