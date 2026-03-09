@@ -20,6 +20,14 @@ struct DownloadView: View {
 
     private let baseURL = "https://owenisas.pythonanywhere.com"
 
+    private static let urlSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 300 // 5 minutes (for large playlists)
+        config.timeoutIntervalForResource = 3600 // 1 hour background tolerance
+        config.waitsForConnectivity = true
+        return URLSession(configuration: config)
+    }()
+
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
@@ -212,11 +220,17 @@ struct DownloadView: View {
 
     // MARK: - Single Video Download
 
-    func fetchAndDownloadSingle(videoId: String) {
+    func fetchAndDownloadSingle(videoId: String, retries: Int = 2) {
         let infoURL = URL(string: "\(baseURL)/info?id=\(videoId)")!
-        URLSession.shared.dataTask(with: infoURL) { data, _, error in
+        Self.urlSession.dataTask(with: infoURL) { data, _, error in
             if let error = error {
-                showError("Network Error", error.localizedDescription)
+                if retries > 0 {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                        self.fetchAndDownloadSingle(videoId: videoId, retries: retries - 1)
+                    }
+                } else {
+                    showError("Network Error", error.localizedDescription)
+                }
                 return
             }
             guard let data = data,
@@ -232,24 +246,14 @@ struct DownloadView: View {
                 downloadProgress = 0.2
             }
 
-            // Download cover
-            guard let coverURL = URL(string: meta.coverUrl) else {
-                showError("Error", "Invalid cover URL")
-                return
-            }
-            download(from: coverURL) { localCover in
-                DispatchQueue.main.async { downloadProgress = 0.4 }
-
-                // Download audio
-                guard let audioURL = URL(string: meta.audioUrl) else {
-                    showError("Error", "Invalid audio URL")
-                    return
-                }
-                DispatchQueue.main.async {
-                    statusMessage = "🎵 Downloading audio…"
-                }
-                download(from: audioURL) { localAudio in
+            // Download audio
+            let continueWithAudio = { (localCover: URL?) in
+                self.download(from: audioURL) { localAudio in
                     DispatchQueue.main.async { downloadProgress = 0.8 }
+                    guard let localAudio = localAudio else {
+                        // Alert automatically thrown by `download` logic. Halt download entirely.
+                        return
+                    }
 
                     // Check for subtitles
                     let subURL = meta.subtitleUrls?.first(where: { $0.key == "en" })?.value ?? meta.subtitleUrls?.first?.value
@@ -264,6 +268,16 @@ struct DownloadView: View {
                         finishSave(title: safeTitle, meta: meta, cover: localCover, audio: localAudio, subtitle: nil)
                     }
                 }
+            }
+
+            if let validCoverURL = coverURL {
+                download(from: validCoverURL) { localCover in
+                    DispatchQueue.main.async { downloadProgress = 0.4 }
+                    continueWithAudio(localCover)
+                }
+            } else {
+                DispatchQueue.main.async { downloadProgress = 0.4 }
+                continueWithAudio(nil)
             }
         }.resume()
     }
@@ -293,7 +307,7 @@ struct DownloadView: View {
         link.contains("list=") || link.contains("/playlist")
     }
 
-    func fetchPlaylistInfo(link: String) {
+    func fetchPlaylistInfo(link: String, retries: Int = 2) {
         // Extract playlist ID
         guard let playlistId = extractPlaylistId(from: link) else {
             showError("Invalid URL", "Could not extract playlist ID.")
@@ -301,17 +315,23 @@ struct DownloadView: View {
         }
 
         let infoURL = URL(string: "\(baseURL)/playlist-info?id=\(playlistId)")!
-        URLSession.shared.dataTask(with: infoURL) { data, _, error in
+        Self.urlSession.dataTask(with: infoURL) { data, _, error in
             if let error = error {
-                // Fallback: try as single video if playlist endpoint doesn't exist
-                if let videoId = extractVideoId(from: link) {
-                    DispatchQueue.main.async {
-                        statusMessage = "Playlist endpoint unavailable, downloading single…"
-                        totalCount = 1
+                if retries > 0 {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                        self.fetchPlaylistInfo(link: link, retries: retries - 1)
                     }
-                    fetchAndDownloadSingle(videoId: videoId)
                 } else {
-                    showError("Network Error", error.localizedDescription)
+                    // Fallback: try as single video if playlist endpoint continues failing
+                    if let videoId = extractVideoId(from: link) {
+                        DispatchQueue.main.async {
+                            statusMessage = "Playlist endpoint unavailable, downloading single…"
+                            totalCount = 1
+                        }
+                        fetchAndDownloadSingle(videoId: videoId)
+                    } else {
+                        showError("Network Error", error.localizedDescription)
+                    }
                 }
                 return
             }
@@ -381,6 +401,12 @@ struct DownloadView: View {
 
         let continueWithAudio = { (localCover: URL?) in
             self.download(from: audioURL) { localAudio in
+                guard let localAudio = localAudio else {
+                    // Audio failed, skip this track gracefully!
+                    self.downloadPlaylistTracks(videos, index: index + 1)
+                    return
+                }
+                
                 let subURLStr = meta.subtitleUrls?.first(where: { $0.key == "en" })?.value ?? meta.subtitleUrls?.first?.value
                 if let subURLStr = subURLStr, let parsedSubURL = URL(string: subURLStr) {
                     self.download(from: parsedSubURL) { localSubtitle in
@@ -547,12 +573,20 @@ struct DownloadView: View {
         return (link as NSString).substring(with: match.range)
     }
 
-    func download(from url: URL, completion: @escaping (URL) -> Void) {
-        URLSession.shared.downloadTask(with: url) { tmp, _, err in
-            if let tmp = tmp {
+    func download(from url: URL, retries: Int = 3, completion: @escaping (URL?) -> Void) {
+        Self.urlSession.downloadTask(with: url) { tmp, response, err in
+            if let tmp = tmp, err == nil {
                 completion(tmp)
             } else {
-                showError("Download Failed", err?.localizedDescription ?? "Unknown error")
+                if retries > 0 {
+                    print("Retrying download... \(retries) left for \(url.lastPathComponent)")
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                        self.download(from: url, retries: retries - 1, completion: completion)
+                    }
+                } else {
+                    showError("Download Failed", err?.localizedDescription ?? "Failed to fetch file.")
+                    completion(nil)
+                }
             }
         }.resume()
     }
