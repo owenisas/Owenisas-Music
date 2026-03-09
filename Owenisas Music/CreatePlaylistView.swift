@@ -3,7 +3,7 @@ import SwiftData
 
 struct CreatePlaylistView: View {
     @ObservedObject var dataManager = DataManager.shared
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.presentationMode) var presentationMode
     @State private var playlistName = ""
     @State private var selectedSongIDs: Set<String> = []
 
@@ -134,6 +134,8 @@ struct CreatePlaylistView: View {
                 dataManager.addSong(song, to: playlist)
             }
         }
-        dismiss()
+        
+        // Use presentationMode instead of dismiss() to ensure it pops properly
+        presentationMode.wrappedValue.dismiss()
     }
 }

@@ -11,6 +11,9 @@ struct DownloadView: View {
     @State private var alertTitle = ""
     @State private var alertMessage = ""
     @FocusState private var linkFieldIsFocused: Bool
+    
+    @State private var targetPlaylistName: String? = nil
+    @State private var downloadedTrackTitles: [String] = []
 
     @ObservedObject var dataManager = DataManager.shared
 
@@ -188,6 +191,8 @@ struct DownloadView: View {
         downloadProgress = 0
         downloadedCount = 0
         totalCount = 0
+        targetPlaylistName = nil
+        downloadedTrackTitles = []
 
         // Check if it's a playlist link
         if isPlaylistLink(link) {
@@ -261,12 +266,13 @@ struct DownloadView: View {
         }.resume()
     }
 
-    private func finishSave(title: String, meta: VideoInfo, cover: URL, audio: URL, subtitle: URL?) {
+    private func finishSave(title: String, meta: VideoInfo, cover: URL?, audio: URL, subtitle: URL?) {
         do {
             try saveSongFiles(title: title, meta: meta, localCover: cover, localAudio: audio, localSubtitle: subtitle)
             DispatchQueue.main.async {
                 downloadProgress = 1.0
                 downloadedCount += 1
+                downloadedTrackTitles.append(title)
                 if isPlaylistLink(youtubeLink) {
                     // This was single download from invalid playlist link fallback.
                     finishSuccess("✅ \"\(title)\" downloaded!")
@@ -326,6 +332,7 @@ struct DownloadView: View {
             DispatchQueue.main.async {
                 totalCount = playlist.videos.count
                 statusMessage = "📋 Found \(totalCount) tracks in \"\(playlist.title)\""
+                targetPlaylistName = playlist.title
             }
 
             // Download each track sequentially
@@ -336,7 +343,8 @@ struct DownloadView: View {
     func downloadPlaylistTracks(_ videos: [VideoInfo], index: Int) {
         guard index < videos.count else {
             DispatchQueue.main.async {
-                finishSuccess("✅ Playlist download complete! (\(downloadedCount) tracks)")
+                self.createAutoPlaylist()
+                self.finishSuccess("✅ Playlist download complete! (\(self.downloadedCount) tracks)")
             }
             return
         }
@@ -349,16 +357,20 @@ struct DownloadView: View {
             downloadProgress = Double(index) / Double(videos.count)
         }
 
-        guard let coverURL = URL(string: meta.coverUrl),
-              let audioURL = URL(string: meta.audioUrl)
-        else {
+        guard let audioURL = URL(string: meta.audioUrl) else {
             // Skip this track and continue
+            DispatchQueue.main.async {
+                self.downloadedTrackTitles.append(safeTitle)
+            }
             downloadPlaylistTracks(videos, index: index + 1)
             return
         }
 
-        download(from: coverURL) { localCover in
-            download(from: audioURL) { localAudio in
+        let coverURLStr = meta.coverUrl.isEmpty ? nil : meta.coverUrl
+        let coverURL = coverURLStr != nil ? URL(string: coverURLStr!) : nil
+
+        let continueWithAudio = { (localCover: URL?) in
+            self.download(from: audioURL) { localAudio in
                 let subURLStr = meta.subtitleUrls?.first(where: { $0.key == "en" })?.value ?? meta.subtitleUrls?.first?.value
                 if let subURLStr = subURLStr, let parsedSubURL = URL(string: subURLStr) {
                     self.download(from: parsedSubURL) { localSubtitle in
@@ -366,6 +378,7 @@ struct DownloadView: View {
                             try self.saveSongFiles(title: safeTitle, meta: meta, localCover: localCover, localAudio: localAudio, localSubtitle: localSubtitle)
                             DispatchQueue.main.async {
                                 self.downloadedCount += 1
+                                self.downloadedTrackTitles.append(safeTitle)
                             }
                         } catch {
                             print("Failed to save \(safeTitle): \(error)")
@@ -378,6 +391,7 @@ struct DownloadView: View {
                         try self.saveSongFiles(title: safeTitle, meta: meta, localCover: localCover, localAudio: localAudio, localSubtitle: nil)
                         DispatchQueue.main.async {
                             self.downloadedCount += 1
+                            self.downloadedTrackTitles.append(safeTitle)
                         }
                     } catch {
                         print("Failed to save \(safeTitle): \(error)")
@@ -387,9 +401,33 @@ struct DownloadView: View {
                 }
             }
         }
+
+        if let validCoverURL = coverURL {
+            download(from: validCoverURL) { localCover in
+                continueWithAudio(localCover)
+            }
+        } else {
+            continueWithAudio(nil)
+        }
     }
 
     // MARK: - Helpers
+
+    private func createAutoPlaylist() {
+        guard let pName = targetPlaylistName, !pName.isEmpty, !downloadedTrackTitles.isEmpty else { return }
+        
+        dataManager.syncFromFileSystem() // Ensure files are loaded
+        let allSongs = dataManager.fetchAllSongs()
+        
+        let matchingSongs = allSongs.filter { downloadedTrackTitles.contains($0.id) }
+        guard !matchingSongs.isEmpty else { return }
+        
+        if let newPlaylist = dataManager.createPlaylist(title: pName) {
+            for song in matchingSongs {
+                dataManager.addSong(song, to: newPlaylist)
+            }
+        }
+    }
 
     struct VideoInfo: Decodable {
         let title: String
@@ -407,7 +445,7 @@ struct DownloadView: View {
         let videos: [VideoInfo]
     }
 
-    func saveSongFiles(title: String, meta: VideoInfo, localCover: URL, localAudio: URL, localSubtitle: URL?) throws {
+    func saveSongFiles(title: String, meta: VideoInfo, localCover: URL?, localAudio: URL, localSubtitle: URL?) throws {
         let fm = FileManager.default
         let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first!
         let songsFolder = docs.appendingPathComponent("Songs", isDirectory: true)
@@ -422,7 +460,12 @@ struct DownloadView: View {
         if fm.fileExists(atPath: destCover.path) { try fm.removeItem(at: destCover) }
         if fm.fileExists(atPath: destAudio.path) { try fm.removeItem(at: destAudio) }
 
-        try fm.moveItem(at: localCover, to: destCover)
+        if let localCover = localCover, fm.fileExists(atPath: localCover.path) {
+            try fm.moveItem(at: localCover, to: destCover)
+        } else {
+            // Provide a blank template if missing
+            fm.createFile(atPath: destCover.path, contents: nil)
+        }
         try fm.moveItem(at: localAudio, to: destAudio)
 
         if let localSubtitle = localSubtitle {
