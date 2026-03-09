@@ -253,6 +253,9 @@ struct DownloadView: View {
             }
 
             let safeTitle = meta.title.replacingOccurrences(of: "/", with: "-")
+            let safeArtist = (meta.artist ?? "Unknown Artist").replacingOccurrences(of: "/", with: "-")
+            let safeIdentifier = "\(safeArtist) - \(safeTitle)"
+            
             DispatchQueue.main.async {
                 statusMessage = "🎶 Downloading \"\(safeTitle)\"…"
                 downloadProgress = 0.2
@@ -260,7 +263,7 @@ struct DownloadView: View {
             }
 
             let existingSongs = self.dataManager.fetchAllSongs()
-            if existingSongs.contains(where: { $0.id == safeTitle }) {
+            if existingSongs.contains(where: { $0.title == meta.title && $0.artist == (meta.artist ?? "Unknown Artist") }) {
                 DispatchQueue.main.async {
                     self.finishSuccess("✅ \"\(safeTitle)\" already exists in library!")
                 }
@@ -291,10 +294,10 @@ struct DownloadView: View {
                             statusMessage = "💬 Downloading subtitles…"
                         }
                         self.download(from: parsedSubURL) { localSubtitle in
-                            finishSave(title: safeTitle, meta: meta, cover: localCover, audio: localAudio, subtitle: localSubtitle)
+                            finishSave(title: safeIdentifier, meta: meta, cover: localCover, audio: localAudio, subtitle: localSubtitle)
                         }
                     } else {
-                        finishSave(title: safeTitle, meta: meta, cover: localCover, audio: localAudio, subtitle: nil)
+                        finishSave(title: safeIdentifier, meta: meta, cover: localCover, audio: localAudio, subtitle: nil)
                     }
                 }
             }
@@ -403,6 +406,8 @@ struct DownloadView: View {
 
         let meta = videos[index]
         let safeTitle = meta.title.replacingOccurrences(of: "/", with: "-")
+        let safeArtist = (meta.artist ?? "Unknown Artist").replacingOccurrences(of: "/", with: "-")
+        let safeIdentifier = "\(safeArtist) - \(safeTitle)"
 
         DispatchQueue.main.async {
             statusMessage = "⬇️ (\(index+1)/\(videos.count)) \"\(safeTitle)\""
@@ -412,10 +417,10 @@ struct DownloadView: View {
 
         // Check if the song has already been downloaded (skip duplicate downloads)
         let existingSongs = dataManager.fetchAllSongs()
-        if existingSongs.contains(where: { $0.id == safeTitle }) {
+        if existingSongs.contains(where: { $0.title == meta.title && $0.artist == (meta.artist ?? "Unknown Artist") }) {
             DispatchQueue.main.async {
                 self.downloadedCount += 1
-                self.downloadedTrackTitles.append(safeTitle)
+                self.downloadedTrackTitles.append(safeIdentifier)
             }
             // Skip and move to next track
             self.downloadPlaylistTracks(videos, index: index + 1)
@@ -425,7 +430,7 @@ struct DownloadView: View {
         guard let audioURL = URL(string: meta.audioUrl) else {
             // Skip this track and continue
             DispatchQueue.main.async {
-                self.downloadedTrackTitles.append(safeTitle)
+                self.downloadedTrackTitles.append(safeIdentifier)
             }
             downloadPlaylistTracks(videos, index: index + 1)
             return
@@ -453,26 +458,26 @@ struct DownloadView: View {
                 if let subURLStr = subURLStr, let parsedSubURL = URL(string: subURLStr) {
                     self.download(from: parsedSubURL) { localSubtitle in
                         do {
-                            try self.saveSongFiles(title: safeTitle, meta: meta, localCover: localCover, localAudio: localAudio, localSubtitle: localSubtitle)
+                            try self.saveSongFiles(title: safeIdentifier, meta: meta, localCover: localCover, localAudio: localAudio, localSubtitle: localSubtitle)
                             DispatchQueue.main.async {
                                 self.downloadedCount += 1
-                                self.downloadedTrackTitles.append(safeTitle)
+                                self.downloadedTrackTitles.append(safeIdentifier)
                             }
                         } catch {
-                            print("Failed to save \(safeTitle): \(error)")
+                            print("Failed to save \(safeIdentifier): \(error)")
                         }
                         // Continue to next track
                         self.downloadPlaylistTracks(videos, index: index + 1)
                     }
                 } else {
                     do {
-                        try self.saveSongFiles(title: safeTitle, meta: meta, localCover: localCover, localAudio: localAudio, localSubtitle: nil)
+                        try self.saveSongFiles(title: safeIdentifier, meta: meta, localCover: localCover, localAudio: localAudio, localSubtitle: nil)
                         DispatchQueue.main.async {
                             self.downloadedCount += 1
-                            self.downloadedTrackTitles.append(safeTitle)
+                            self.downloadedTrackTitles.append(safeIdentifier)
                         }
                     } catch {
-                        print("Failed to save \(safeTitle): \(error)")
+                        print("Failed to save \(safeIdentifier): \(error)")
                     }
                     // Continue to next track
                     self.downloadPlaylistTracks(videos, index: index + 1)
@@ -559,6 +564,7 @@ struct DownloadView: View {
             // Find the newly created song and update its metadata
             let allSongs = dataManager.fetchAllSongs()
             if let songData = allSongs.first(where: { $0.id == title }) {
+                songData.title = meta.title
                 songData.artist = meta.artist ?? "Unknown Artist"
                 songData.albumTitle = meta.album ?? ""
                 songData.duration = meta.duration ?? 0
