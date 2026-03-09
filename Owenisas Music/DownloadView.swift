@@ -505,7 +505,10 @@ struct DownloadView: View {
         let matchingSongs = allSongs.filter { downloadedTrackTitles.contains($0.id) }
         guard !matchingSongs.isEmpty else { return }
         
-        if let newPlaylist = dataManager.createPlaylist(title: pName) {
+        // Pick the first downloaded song's cover to represent the playlist locally
+        let firstSongCover = matchingSongs.first?.coverImagePath
+        
+        if let newPlaylist = dataManager.createPlaylist(title: pName, coverImagePath: firstSongCover) {
             for song in matchingSongs {
                 dataManager.addSong(song, to: newPlaylist)
             }

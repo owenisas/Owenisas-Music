@@ -113,9 +113,9 @@ class DataManager: ObservableObject {
     }
 
     // MARK: - Playlist CRUD
-    func createPlaylist(title: String) -> PlaylistData? {
+    func createPlaylist(title: String, coverImagePath: String? = nil) -> PlaylistData? {
         guard let ctx = modelContext else { return nil }
-        let playlist = PlaylistData(title: title)
+        let playlist = PlaylistData(title: title, coverImagePath: coverImagePath)
         ctx.insert(playlist)
         try? ctx.save()
         NotificationCenter.default.post(name: .init("PlaylistsChanged"), object: nil)
