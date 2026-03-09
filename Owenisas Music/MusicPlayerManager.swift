@@ -23,6 +23,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
     static let shared = MusicPlayerManager()
 
     private var player: AVAudioPlayer?
+    private var secondaryPlayer: AVAudioPlayer?
     private var timer: AnyCancellable?
 
     // MARK: – Published State
@@ -33,6 +34,8 @@ class MusicPlayerManager: NSObject, ObservableObject {
     @Published var isShuffled = false
     @Published var repeatMode: RepeatMode = .off
     @Published var showFullPlayer = false
+    @Published var crossfadeEnabled = true
+    @Published var crossfadeDuration: TimeInterval = 3.0
 
     // MARK: – Queue
     /// The original ordered queue (before shuffle)
@@ -56,6 +59,35 @@ class MusicPlayerManager: NSObject, ObservableObject {
             print("Error setting up audio session: \(error)")
         }
         setupRemoteCommandCenter()
+        setupInterruptionObserver()
+    }
+
+    private func setupInterruptionObserver() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleInterruption),
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance()
+        )
+    }
+
+    @objc private func handleInterruption(notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
+            return
+        }
+
+        if type == .began {
+            pause()
+        } else if type == .ended {
+            if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
+                let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+                if options.contains(.shouldResume) {
+                    resume()
+                }
+            }
+        }
     }
 
     // MARK: - Play
@@ -78,8 +110,73 @@ class MusicPlayerManager: NSObject, ObservableObject {
 
         loadAndPlay(song)
     }
+    
+    // MARK: - Queue Management
+    func playNext(_ song: Song) {
+        if queue.isEmpty {
+            play(song: song, in: [song])
+            return
+        }
+        
+        let nextIndex = currentIndex + 1
+        if nextIndex <= queue.count {
+            queue.insert(song, at: nextIndex)
+            // Also update original queue if it contains the song
+            if !originalQueue.contains(where: { $0.id == song.id }) {
+                originalQueue.append(song)
+            }
+        }
+    }
+    
+    func addToQueue(_ song: Song) {
+        if queue.isEmpty {
+            play(song: song, in: [song])
+            return
+        }
+        
+        queue.append(song)
+        if !originalQueue.contains(where: { $0.id == song.id }) {
+            originalQueue.append(song)
+        }
+    }
 
-    /// Resume current song (no queue change)
+    func moveInQueue(from source: IndexSet, to destination: Int) {
+        queue.move(fromOffsets: source, toOffset: destination)
+        // Re-calculate currentIndex
+        if let current = currentSong, let idx = queue.firstIndex(where: { $0.id == current.id }) {
+            currentIndex = idx
+        }
+    }
+
+    func removeFromQueue(at offsets: IndexSet) {
+        let currentId = currentSong?.id
+        queue.remove(atOffsets: offsets)
+        
+        // If current song was removed, stop or play next
+        if let currentId = currentId, !queue.contains(where: { $0.id == currentId }) {
+            if queue.isEmpty {
+                stop()
+            } else {
+                next()
+            }
+        } else if let current = currentSong, let idx = queue.firstIndex(where: { $0.id == current.id }) {
+            currentIndex = idx
+        }
+    }
+
+    func stopAndRemoveFromQueue(songId: String) {
+        if currentSong?.id == songId {
+            stop()
+        }
+        queue.removeAll { $0.id == songId }
+        originalQueue.removeAll { $0.id == songId }
+        
+        if let current = currentSong, let idx = queue.firstIndex(where: { $0.id == current.id }) {
+            currentIndex = idx
+        }
+    }
+
+    // MARK: - Playback
     func resume() {
         player?.play()
         isPlaying = true
@@ -87,7 +184,12 @@ class MusicPlayerManager: NSObject, ObservableObject {
         updateNowPlayingInfo()
     }
 
-    private func loadAndPlay(_ song: Song) {
+    private func loadAndPlay(_ song: Song, crossfade: Bool = false) {
+        if crossfade && crossfadeEnabled {
+            performCrossfade(to: song)
+            return
+        }
+
         stopTimer()
         player?.stop()
         currentSong = song
@@ -102,9 +204,64 @@ class MusicPlayerManager: NSObject, ObservableObject {
             isPlaying = true
             startTimer()
             updateNowPlayingInfo()
+            updateListeningHistory(song)
         } catch {
             print("Error playing \(song.title): \(error)")
+            isPlaying = false
+            currentSong = nil
+            stopTimer()
+            updateNowPlayingInfo(clear: true)
         }
+    }
+
+    private func performCrossfade(to song: Song) {
+        guard let oldPlayer = player else {
+            loadAndPlay(song, crossfade: false)
+            return
+        }
+
+        do {
+            secondaryPlayer = try AVAudioPlayer(contentsOf: song.audioFileURL)
+            secondaryPlayer?.delegate = self
+            secondaryPlayer?.volume = 0
+            secondaryPlayer?.prepareToPlay()
+            secondaryPlayer?.play()
+
+            // Crossfade
+            oldPlayer.setVolume(0, fadeDuration: crossfadeDuration)
+            secondaryPlayer?.setVolume(1.0, fadeDuration: crossfadeDuration)
+
+            currentSong = song
+            duration = secondaryPlayer?.duration ?? 0
+            currentTime = 0
+            isPlaying = true
+            updateNowPlayingInfo()
+            updateListeningHistory(song)
+
+            // After fade completes, clean up
+            DispatchQueue.main.asyncAfter(deadline: .now() + crossfadeDuration) { [weak self] in
+                oldPlayer.stop()
+                self?.player = self?.secondaryPlayer
+                self?.secondaryPlayer = nil
+            }
+        } catch {
+            print("Crossfade fail: \(error)")
+            loadAndPlay(song, crossfade: false)
+        }
+    }
+
+    private func updateListeningHistory(_ song: Song) {
+        // Find SongData in SwiftData and update lastPlayedDate
+        // We'll let DataManager handle this via a notification or direct call if we had the context
+        // For now, let's assume DataManager listens or we call it
+        NotificationCenter.default.post(name: .init("SongPlayed"), object: song.id)
+    }
+
+    func toggleFavorite() {
+        guard var song = currentSong else { return }
+        song.isFavorited.toggle()
+        currentSong = song
+        NotificationCenter.default.post(name: .init("SongFavoriteToggled"), object: song.id)
     }
 
     // MARK: - Pause / Stop
@@ -126,6 +283,8 @@ class MusicPlayerManager: NSObject, ObservableObject {
     func stop() {
         player?.stop()
         player = nil
+        secondaryPlayer?.stop()
+        secondaryPlayer = nil
         isPlaying = false
         currentSong = nil
         currentTime = 0
@@ -143,19 +302,23 @@ class MusicPlayerManager: NSObject, ObservableObject {
 
     // MARK: - Next / Previous
     func next() {
-        guard !queue.isEmpty else { return }
+        guard !queue.isEmpty else {
+            stop()
+            return
+        }
         let nextIndex = currentIndex + 1
         if nextIndex < queue.count {
             currentIndex = nextIndex
-            loadAndPlay(queue[nextIndex])
+            loadAndPlay(queue[nextIndex], crossfade: true)
         } else if repeatMode == .all {
             currentIndex = 0
-            loadAndPlay(queue[0])
+            loadAndPlay(queue[0], crossfade: true)
+        } else {
+            stop()
         }
     }
 
     func previous() {
-        // If more than 3s in, restart; otherwise go to previous
         if currentTime > 3 {
             seek(to: 0)
             return
@@ -164,10 +327,12 @@ class MusicPlayerManager: NSObject, ObservableObject {
         let prevIndex = currentIndex - 1
         if prevIndex >= 0 {
             currentIndex = prevIndex
-            loadAndPlay(queue[prevIndex])
+            loadAndPlay(queue[prevIndex], crossfade: true)
         } else if repeatMode == .all {
             currentIndex = queue.count - 1
-            loadAndPlay(queue[currentIndex])
+            loadAndPlay(queue[currentIndex], crossfade: true)
+        } else {
+            seek(to: 0)
         }
     }
 
@@ -196,11 +361,16 @@ class MusicPlayerManager: NSObject, ObservableObject {
 
     // MARK: - Timer (progress tracking)
     private func startTimer() {
-        timer = Timer.publish(every: 0.5, on: .main, in: .common)
+        timer = Timer.publish(every: 0.05, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self = self, let p = self.player else { return }
                 self.currentTime = p.currentTime
+                
+                // Auto-next logic: If near end and crossfade enabled
+                if self.crossfadeEnabled && (p.duration - p.currentTime) < self.crossfadeDuration && !p.isLooping {
+                    // Start preparing next? Actually AVAudioPlayerDidFinishPlaying is safer for basic flow.
+                }
             }
     }
 
@@ -235,7 +405,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
             MPMediaItemPropertyPlaybackDuration: player.duration,
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0
         ]
-        if let image = UIImage(contentsOfFile: song.coverImageURL.path) {
+        if let path = song.coverImageURL?.path, let image = UIImage(contentsOfFile: path) {
             let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
             info[MPMediaItemPropertyArtwork] = artwork
         }
@@ -272,9 +442,17 @@ class MusicPlayerManager: NSObject, ObservableObject {
     }
 }
 
+// Extension to help with loops if needed
+extension AVAudioPlayer {
+    var isLooping: Bool { numberOfLoops != 0 }
+}
+
 // MARK: - AVAudioPlayerDelegate
 extension MusicPlayerManager: AVAudioPlayerDelegate {
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        // If this was the secondary player from a crossfade, ignore
+        if player == secondaryPlayer { return }
+        
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             switch self.repeatMode {
@@ -288,7 +466,7 @@ extension MusicPlayerManager: AVAudioPlayerDelegate {
                 let nextIndex = self.currentIndex + 1
                 if nextIndex < self.queue.count {
                     self.currentIndex = nextIndex
-                    self.loadAndPlay(self.queue[nextIndex])
+                    self.loadAndPlay(self.queue[nextIndex], crossfade: true)
                 } else {
                     self.isPlaying = false
                     self.currentSong = nil
@@ -298,3 +476,4 @@ extension MusicPlayerManager: AVAudioPlayerDelegate {
         }
     }
 }
+

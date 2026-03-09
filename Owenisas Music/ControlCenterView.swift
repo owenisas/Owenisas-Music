@@ -6,99 +6,86 @@ struct MiniPlayerView: View {
     var body: some View {
         if let song = player.currentSong {
             VStack(spacing: 0) {
-                // Thin progress bar at the top
+                // Thin progress line
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         Rectangle()
-                            .fill(Color.white.opacity(0.1))
+                            .fill(.white.opacity(0.08))
                         Rectangle()
-                            .fill(
-                                LinearGradient(
-                                    colors: [.green, .green.opacity(0.7)],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                )
-                            )
+                            .fill(.white.opacity(0.6))
                             .frame(width: geo.size.width * progressFraction)
+                            .animation(.linear(duration: 0.25), value: progressFraction)
                     }
                 }
-                .frame(height: 3)
+                .frame(height: 2.5)
 
-                // Player content
                 HStack(spacing: 12) {
-                    // Song cover
-                    if let uiImage = UIImage(contentsOfFile: song.coverImageURL.path) {
-                        Image(uiImage: uiImage)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: 44, height: 44)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                    } else {
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.gray.opacity(0.3))
-                            .frame(width: 44, height: 44)
-                            .overlay(
-                                Image(systemName: "music.note")
-                                    .foregroundStyle(.white.opacity(0.5))
-                            )
-                    }
+                    CachedCoverImage(song.coverImageURL, size: 46, cornerRadius: 8)
+                        .shadow(color: .white.opacity(0.08), radius: 8)
 
-                    // Song info
                     VStack(alignment: .leading, spacing: 2) {
                         Text(song.title)
-                            .font(.subheadline.bold())
+                            .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(.white)
                             .lineLimit(1)
 
                         Text(song.artist)
-                            .font(.caption)
-                            .foregroundStyle(.white.opacity(0.6))
+                            .font(.system(size: 12))
+                            .foregroundStyle(.white.opacity(0.5))
                             .lineLimit(1)
                     }
 
                     Spacer()
 
-                    // Play / Pause
-                    Button { player.togglePlayPause() } label: {
+                    Button {
+                        let impact = UIImpactFeedbackGenerator(style: .light)
+                        impact.impactOccurred()
+                        player.togglePlayPause()
+                    } label: {
                         Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.title3)
+                            .font(.system(size: 18, weight: .semibold))
                             .foregroundStyle(.white)
+                            .frame(width: 36, height: 36)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
 
-                    // Next
                     Button { player.next() } label: {
                         Image(systemName: "forward.fill")
-                            .font(.body)
-                            .foregroundStyle(.white.opacity(0.7))
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.6))
+                            .frame(width: 28, height: 28)
                     }
                     .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
             }
-            .background(
-                ZStack {
-                    // Blurred album art background
-                    if let uiImage = UIImage(contentsOfFile: song.coverImageURL.path) {
-                        Image(uiImage: uiImage)
-                            .resizable()
-                            .scaledToFill()
-                            .blur(radius: 30)
-                            .overlay(Color.black.opacity(0.6))
-                    } else {
-                        Color(white: 0.15)
-                    }
-                }
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-            .shadow(color: .black.opacity(0.4), radius: 8, x: 0, y: 4)
+            .background(miniPlayerBackground(song: song))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .shadow(color: .black.opacity(0.35), radius: 10, x: 0, y: 5)
             .padding(.horizontal, 8)
             .contentShape(Rectangle())
             .onTapGesture {
                 player.showFullPlayer = true
             }
-            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .transition(.asymmetric(
+                insertion: .move(edge: .bottom).combined(with: .opacity),
+                removal: .opacity
+            ))
+        }
+    }
+
+    @ViewBuilder
+    private func miniPlayerBackground(song: Song) -> some View {
+        if let path = song.coverImageURL?.path, let uiImage = ImageCache.shared.image(for: path) {
+            Image(uiImage: uiImage)
+                .resizable()
+                .scaledToFill()
+                .blur(radius: 40)
+                .overlay(Color.black.opacity(0.65))
+        } else {
+            Color(white: 0.1)
         }
     }
 

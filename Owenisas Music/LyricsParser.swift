@@ -59,7 +59,8 @@ class LyricsParser {
     
     // Parse time in format HH:MM:SS.mmm or MM:SS.mmm
     private static func parseTime(_ timeStr: String) -> TimeInterval {
-        let str = timeStr.trimmingCharacters(in: .whitespaces)
+        // Handle both dot (VTT) and comma (SRT) decimal separators
+        let str = timeStr.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
         let parts = str.components(separatedBy: ":")
         var seconds: TimeInterval = 0
         

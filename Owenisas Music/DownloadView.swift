@@ -257,8 +257,8 @@ struct DownloadView: View {
             let safeIdentifier = "\(safeArtist) - \(safeTitle)"
             
             DispatchQueue.main.async {
-                statusMessage = "🎶 Downloading \"\(safeTitle)\"…"
-                downloadProgress = 0.2
+                self.statusMessage = "🎶 Downloading \"\(safeTitle)\"…"
+                self.downloadProgress = 0.2
                 self.sendProgressNotification(message: "Downloading: \(safeTitle)")
             }
 
@@ -281,42 +281,54 @@ struct DownloadView: View {
             // Download audio
             let continueWithAudio = { (localCover: URL?) in
                 self.download(from: audioURL) { localAudio in
-                    DispatchQueue.main.async { downloadProgress = 0.8 }
-                    guard let localAudio = localAudio else {
-                        // Alert automatically thrown by `download` logic. Halt download entirely.
-                        return
+                    DispatchQueue.main.async { self.downloadProgress = 0.8 }
+                    guard let localAudio = localAudio else { return }
+
+                    // Download YouTube subtitle tracks
+                    let ytSubs = meta.subtitleUrls?.filter({ $0.key != "lyrics" }) ?? [:]
+
+                    let saveWithLyrics = { (ytDownloaded: [(lang: String, url: URL)]) in
+                        // Also try LRCLIB for high-quality synced lyrics
+                        DispatchQueue.main.async {
+                            self.statusMessage = "🎵 Fetching synced lyrics…"
+                        }
+                        self.fetchLRCLIBLyrics(title: meta.title, artist: meta.artist ?? "", album: meta.album ?? "", duration: meta.duration ?? 0) { lrcFile in
+                            var allSubs = ytDownloaded
+                            if let lrcFile = lrcFile {
+                                allSubs.append((lang: "lyrics", url: lrcFile))
+                            }
+                            self.finishSave(title: safeIdentifier, meta: meta, cover: localCover, audio: localAudio, subtitles: allSubs)
+                        }
                     }
 
-                    // Check for subtitles
-                    let subURL = meta.subtitleUrls?.first(where: { $0.key == "en" })?.value ?? meta.subtitleUrls?.first?.value
-                    if let subURLStr = subURL, let parsedSubURL = URL(string: subURLStr) {
+                    if !ytSubs.isEmpty {
                         DispatchQueue.main.async {
-                            statusMessage = "💬 Downloading subtitles…"
+                            self.statusMessage = "💬 Downloading subtitles (\(ytSubs.count) languages)…"
                         }
-                        self.download(from: parsedSubURL) { localSubtitle in
-                            finishSave(title: safeIdentifier, meta: meta, cover: localCover, audio: localAudio, subtitle: localSubtitle)
+                        self.downloadAllSubtitles(ytSubs) { downloaded in
+                            saveWithLyrics(downloaded)
                         }
                     } else {
-                        finishSave(title: safeIdentifier, meta: meta, cover: localCover, audio: localAudio, subtitle: nil)
+                        saveWithLyrics([])
                     }
                 }
             }
 
             if let validCoverURL = coverURL {
                 download(from: validCoverURL) { localCover in
-                    DispatchQueue.main.async { downloadProgress = 0.4 }
+                    DispatchQueue.main.async { self.downloadProgress = 0.4 }
                     continueWithAudio(localCover)
                 }
             } else {
-                DispatchQueue.main.async { downloadProgress = 0.4 }
+                DispatchQueue.main.async { self.downloadProgress = 0.4 }
                 continueWithAudio(nil)
             }
         }.resume()
     }
 
-    private func finishSave(title: String, meta: VideoInfo, cover: URL?, audio: URL, subtitle: URL?) {
+    private func finishSave(title: String, meta: VideoInfo, cover: URL?, audio: URL, subtitles: [(lang: String, url: URL)]) {
         do {
-            try saveSongFiles(title: title, meta: meta, localCover: cover, localAudio: audio, localSubtitle: subtitle)
+            try saveSongFiles(title: title, meta: meta, localCover: cover, localAudio: audio, localSubtitles: subtitles)
             DispatchQueue.main.async {
                 downloadProgress = 1.0
                 downloadedCount += 1
@@ -340,13 +352,8 @@ struct DownloadView: View {
     }
 
     func fetchPlaylistInfo(link: String, retries: Int = 2) {
-        // Extract playlist ID
-        guard let playlistId = extractPlaylistId(from: link) else {
-            showError("Invalid URL", "Could not extract playlist ID.")
-            return
-        }
-
-        let infoURL = URL(string: "\(baseURL)/playlist-info?id=\(playlistId)")!
+        let encodedLink = link.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? link
+        let infoURL = URL(string: "\(baseURL)/playlist-info?url=\(encodedLink)")!
         Self.urlSession.dataTask(with: infoURL) { data, _, error in
             if let error = error {
                 if retries > 0 {
@@ -454,11 +461,14 @@ struct DownloadView: View {
                     return
                 }
                 
-                let subURLStr = meta.subtitleUrls?.first(where: { $0.key == "en" })?.value ?? meta.subtitleUrls?.first?.value
+                let subURLStr = self.bestSubtitleURL(from: meta)
                 if let subURLStr = subURLStr, let parsedSubURL = URL(string: subURLStr) {
                     self.download(from: parsedSubURL) { localSubtitle in
+                        let subs: [(lang: String, url: URL)] = localSubtitle != nil
+                            ? [(lang: meta.language ?? "und", url: localSubtitle!)]
+                            : []
                         do {
-                            try self.saveSongFiles(title: safeIdentifier, meta: meta, localCover: localCover, localAudio: localAudio, localSubtitle: localSubtitle)
+                            try self.saveSongFiles(title: safeIdentifier, meta: meta, localCover: localCover, localAudio: localAudio, localSubtitles: subs)
                             DispatchQueue.main.async {
                                 self.downloadedCount += 1
                                 self.downloadedTrackTitles.append(safeIdentifier)
@@ -466,12 +476,11 @@ struct DownloadView: View {
                         } catch {
                             print("Failed to save \(safeIdentifier): \(error)")
                         }
-                        // Continue to next track
                         self.downloadPlaylistTracks(videos, index: index + 1)
                     }
                 } else {
                     do {
-                        try self.saveSongFiles(title: safeIdentifier, meta: meta, localCover: localCover, localAudio: localAudio, localSubtitle: nil)
+                        try self.saveSongFiles(title: safeIdentifier, meta: meta, localCover: localCover, localAudio: localAudio, localSubtitles: [])
                         DispatchQueue.main.async {
                             self.downloadedCount += 1
                             self.downloadedTrackTitles.append(safeIdentifier)
@@ -479,7 +488,6 @@ struct DownloadView: View {
                     } catch {
                         print("Failed to save \(safeIdentifier): \(error)")
                     }
-                    // Continue to next track
                     self.downloadPlaylistTracks(videos, index: index + 1)
                 }
             }
@@ -520,9 +528,189 @@ struct DownloadView: View {
         let artist: String?
         let album: String?
         let duration: Double?
+        let language: String?
         let audioUrl: String
         let coverUrl: String
         let subtitleUrls: [String: String]?
+    }
+
+    /// Pick the best subtitle URL based on the video's original language.
+    /// Priority: LRCLIB lyrics → original language → "en" → first available.
+    func bestSubtitleURL(from meta: VideoInfo) -> String? {
+        guard let subs = meta.subtitleUrls, !subs.isEmpty else { return nil }
+
+        // 1. LRCLIB synced lyrics (highest quality)
+        if let lyrics = subs["lyrics"] { return lyrics }
+
+        // 2. Try video's original language (e.g. "ja" for a Japanese song)
+        if let lang = meta.language, !lang.isEmpty, let url = subs[lang] {
+            return url
+        }
+
+        // 3. Try original language with region prefix (e.g. "ja" matches "ja-JP")
+        if let lang = meta.language, !lang.isEmpty {
+            if let match = subs.first(where: { $0.key.hasPrefix(lang) }) {
+                return match.value
+            }
+        }
+
+        // 4. Fallback to English
+        if let en = subs["en"] { return en }
+        if let match = subs.first(where: { $0.key.hasPrefix("en") }) {
+            return match.value
+        }
+
+        // 5. Last resort: first available
+        return subs.first?.value
+    }
+
+    /// Download all subtitle tracks concurrently. Returns array of (language, local file URL).
+    func downloadAllSubtitles(_ subs: [String: String], completion: @escaping ([(lang: String, url: URL)]) -> Void) {
+        let group = DispatchGroup()
+        var results: [(lang: String, url: URL)] = []
+        let lock = NSLock()
+
+        for (lang, urlStr) in subs {
+            guard let url = URL(string: urlStr) else { continue }
+            group.enter()
+            download(from: url, retries: 1) { localFile in
+                if let localFile = localFile {
+                    lock.lock()
+                    results.append((lang: lang, url: localFile))
+                    lock.unlock()
+                }
+                group.leave()
+            }
+        }
+
+        group.notify(queue: .main) {
+            completion(results)
+        }
+    }
+
+    // MARK: - LRCLIB Lyrics (client-side, bypasses PythonAnywhere whitelist)
+
+    struct LRCLIBResponse: Decodable {
+        let syncedLyrics: String?
+        let plainLyrics: String?
+    }
+
+    /// Fetch synced lyrics from LRCLIB and convert to VTT. Returns a local temp file URL on success.
+    func fetchLRCLIBLyrics(title: String, artist: String, album: String = "", duration: Double = 0, completion: @escaping (URL?) -> Void) {
+        // Clean up auto-generated YouTube artist names
+        let cleanArtist = artist.replacingOccurrences(of: " - Topic", with: "").trimmingCharacters(in: .whitespaces)
+
+        // 1. Try exact match
+        var components = URLComponents(string: "https://lrclib.net/api/get")!
+        var queryItems = [
+            URLQueryItem(name: "track_name", value: title),
+            URLQueryItem(name: "artist_name", value: cleanArtist)
+        ]
+        if !album.isEmpty { queryItems.append(URLQueryItem(name: "album_name", value: album)) }
+        if duration > 0 { queryItems.append(URLQueryItem(name: "duration", value: String(Int(duration)))) }
+        components.queryItems = queryItems
+
+        guard let url = components.url else { completion(nil); return }
+
+        var request = URLRequest(url: url)
+        request.setValue("OwenisasMusic/1.0 github.com/owenisas/Owenisas-Music", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 10
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let data = data, let result = try? JSONDecoder().decode(LRCLIBResponse.self, from: data) {
+                if let synced = result.syncedLyrics, let vtt = self.lrcToVTT(synced) {
+                    completion(self.writeVTTToTemp(vtt))
+                    return
+                }
+                if let plain = result.plainLyrics {
+                    let vtt = "WEBVTT\n\n00:00.000 --> 99:59.999\n" + plain
+                    completion(self.writeVTTToTemp(vtt))
+                    return
+                }
+            }
+
+            // 2. Fallback: search
+            self.searchLRCLIB(query: "\(cleanArtist) \(title)") { vttFile in
+                completion(vttFile)
+            }
+        }.resume()
+    }
+
+    private func searchLRCLIB(query: String, completion: @escaping (URL?) -> Void) {
+        var components = URLComponents(string: "https://lrclib.net/api/search")!
+        components.queryItems = [URLQueryItem(name: "q", value: query)]
+
+        guard let url = components.url else { completion(nil); return }
+
+        var request = URLRequest(url: url)
+        request.setValue("OwenisasMusic/1.0 github.com/owenisas/Owenisas-Music", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 10
+
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            guard let data = data, let results = try? JSONDecoder().decode([LRCLIBResponse].self, from: data) else {
+                completion(nil)
+                return
+            }
+
+            // Pick first result with synced lyrics
+            for r in results {
+                if let synced = r.syncedLyrics, let vtt = self.lrcToVTT(synced) {
+                    completion(self.writeVTTToTemp(vtt))
+                    return
+                }
+            }
+            // Plain lyrics as last resort
+            if let first = results.first, let plain = first.plainLyrics {
+                let vtt = "WEBVTT\n\n00:00.000 --> 99:59.999\n" + plain
+                completion(self.writeVTTToTemp(vtt))
+                return
+            }
+            completion(nil)
+        }.resume()
+    }
+
+    /// Convert LRC format ([MM:SS.xx]text) to WebVTT format.
+    private func lrcToVTT(_ lrc: String) -> String? {
+        let lines = lrc.components(separatedBy: "\n")
+        var entries: [(time: Double, text: String)] = []
+
+        let pattern = /\[(\d+):(\d+)\.(\d+)\](.*)/
+        for line in lines {
+            guard let match = line.firstMatch(of: pattern) else { continue }
+            let mins = Double(match.1) ?? 0
+            let secs = Double(match.2) ?? 0
+            let msStr = String(match.3)
+            let ms = Double(msStr.padding(toLength: 3, withPad: "0", startingAt: 0).prefix(3)) ?? 0
+            let text = String(match.4).trimmingCharacters(in: .whitespaces)
+            if text.isEmpty { continue }
+            entries.append((time: mins * 60 + secs + ms / 1000.0, text: text))
+        }
+
+        guard !entries.isEmpty else { return nil }
+
+        var vtt = "WEBVTT\n\n"
+        for (i, entry) in entries.enumerated() {
+            let end = i + 1 < entries.count ? entries[i + 1].time : entry.time + 5.0
+            vtt += "\(formatVTTTime(entry.time)) --> \(formatVTTTime(end))\n"
+            vtt += "\(entry.text)\n\n"
+        }
+        return vtt
+    }
+
+    private func formatVTTTime(_ t: Double) -> String {
+        let m = Int(t) / 60
+        let s = t - Double(m * 60)
+        return String(format: "%02d:%06.3f", m, s)
+    }
+
+    private func writeVTTToTemp(_ vtt: String) -> URL? {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".vtt")
+        do {
+            try vtt.write(to: tmp, atomically: true, encoding: .utf8)
+            return tmp
+        } catch {
+            return nil
+        }
     }
 
     struct PlaylistInfo: Decodable {
@@ -532,7 +720,7 @@ struct DownloadView: View {
         let videos: [VideoInfo]
     }
 
-    func saveSongFiles(title: String, meta: VideoInfo, localCover: URL?, localAudio: URL, localSubtitle: URL?) throws {
+    func saveSongFiles(title: String, meta: VideoInfo, localCover: URL?, localAudio: URL, localSubtitles: [(lang: String, url: URL)]) throws {
         let fm = FileManager.default
         let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first!
         let songsFolder = docs.appendingPathComponent("Songs", isDirectory: true)
@@ -548,22 +736,29 @@ struct DownloadView: View {
         if fm.fileExists(atPath: destAudio.path) { try fm.removeItem(at: destAudio) }
 
         if let localCover = localCover, fm.fileExists(atPath: localCover.path) {
-            try fm.moveItem(at: localCover, to: destCover)
-        } else {
-            // Provide a blank template if missing
-            fm.createFile(atPath: destCover.path, contents: nil)
+            // Convert to actual JPEG — downloaded files may be WebP/PNG despite .jpg extension
+            if let imageData = try? Data(contentsOf: localCover),
+               let uiImage = UIImage(data: imageData),
+               let jpegData = uiImage.jpegData(compressionQuality: 0.9) {
+                try jpegData.write(to: destCover)
+                try? fm.removeItem(at: localCover) // clean up temp file
+            } else {
+                // Fallback: just move the file as-is
+                try fm.moveItem(at: localCover, to: destCover)
+            }
         }
         try fm.moveItem(at: localAudio, to: destAudio)
 
-        if let localSubtitle = localSubtitle {
-            let destSubtitle = songDir.appendingPathComponent("\(title).vtt")
+        // Save each subtitle track with language code: {title}.{lang}.vtt
+        for sub in localSubtitles {
+            let destSubtitle = songDir.appendingPathComponent("\(title).\(sub.lang).vtt")
             if fm.fileExists(atPath: destSubtitle.path) { try fm.removeItem(at: destSubtitle) }
-            try fm.moveItem(at: localSubtitle, to: destSubtitle)
+            try fm.moveItem(at: sub.url, to: destSubtitle)
         }
 
         // Update SwiftData with artist/album metadata
         DispatchQueue.main.async {
-            dataManager.syncFromFileSystem()
+            dataManager.syncSingleSong(folderName: title)
             // Find the newly created song and update its metadata
             let allSongs = dataManager.fetchAllSongs()
             if let songData = allSongs.first(where: { $0.id == title }) {
@@ -577,19 +772,21 @@ struct DownloadView: View {
     }
 
     func finishSuccess(_ message: String) {
-        statusMessage = message
-        isDownloading = false
-        youtubeLink = ""
-        // Sync with SwiftData
-        dataManager.syncFromFileSystem()
-        NotificationCenter.default.post(name: .init("SongsFolderChanged"), object: nil)
+        DispatchQueue.main.async {
+            self.statusMessage = message
+            self.isDownloading = false
+            self.youtubeLink = ""
+            // Sync with SwiftData
+            self.dataManager.syncFromFileSystem()
+            NotificationCenter.default.post(name: .init("SongsFolderChanged"), object: nil)
 
-        // Haptic feedback
-        let generator = UINotificationFeedbackGenerator()
-        generator.notificationOccurred(.success)
-        
-        sendCompletionNotification(message: message)
-        endBackgroundTask()
+            // Haptic feedback
+            let generator = UINotificationFeedbackGenerator()
+            generator.notificationOccurred(.success)
+            
+            self.sendCompletionNotification(message: message)
+            self.endBackgroundTask()
+        }
     }
 
     func showError(_ title: String, _ message: String) {
@@ -640,7 +837,17 @@ struct DownloadView: View {
     func download(from url: URL, retries: Int = 3, completion: @escaping (URL?) -> Void) {
         Self.urlSession.downloadTask(with: url) { tmp, response, err in
             if let tmp = tmp, err == nil {
-                completion(tmp)
+                // Move to a persistent temporary location immediately
+                let fm = FileManager.default
+                let cacheDir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first!
+                let persistentTempURL = cacheDir.appendingPathComponent(UUID().uuidString).appendingPathExtension(url.pathExtension)
+                do {
+                    try fm.moveItem(at: tmp, to: persistentTempURL)
+                    completion(persistentTempURL)
+                } catch {
+                    print("Failed to save persistent temp file: \(error)")
+                    completion(nil)
+                }
             } else {
                 if retries > 0 {
                     print("Retrying download... \(retries) left for \(url.lastPathComponent)")
@@ -648,7 +855,7 @@ struct DownloadView: View {
                         self.download(from: url, retries: retries - 1, completion: completion)
                     }
                 } else {
-                    showError("Download Failed", err?.localizedDescription ?? "Failed to fetch file.")
+                    self.showError("Download Failed", err?.localizedDescription ?? "Failed to fetch file.")
                     completion(nil)
                 }
             }
@@ -656,6 +863,9 @@ struct DownloadView: View {
     }
 
     private func sendProgressNotification(message: String) {
+        // Only send progress notifications for single downloads or every 5th track in a playlist to avoid spam
+        if totalCount > 1 && downloadedCount % 5 != 0 { return }
+        
         let content = UNMutableNotificationContent()
         content.title = "Music Download"
         content.body = message

@@ -14,26 +14,46 @@ struct PlaylistDetailView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 0) {
+        List {
+            Section {
                 headerSection
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                
                 controlsSection
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+            }
+
+            Section {
                 trackList
             }
         }
+        .listStyle(.plain)
         .background(Color(UIColor.systemBackground))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button {
-                        newName = playlist.title
-                        showRenameAlert = true
+                HStack {
+                    EditButton()
+                        .foregroundStyle(.green)
+                    
+                    Menu {
+                        Button {
+                            newName = playlist.title
+                            showRenameAlert = true
+                        } label: {
+                            Label("Rename", systemImage: "pencil")
+                        }
+                        
+                        Button(role: .destructive) {
+                            dataManager.deletePlaylist(playlist)
+                        } label: {
+                            Label("Delete Playlist", systemImage: "trash")
+                        }
                     } label: {
-                        Label("Rename", systemImage: "pencil")
+                        Image(systemName: "ellipsis.circle")
                     }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
                 }
             }
         }
@@ -70,8 +90,9 @@ struct PlaylistDetailView: View {
     }
 
     private var playlistCover: some View {
-        let covers = playlist.songs.prefix(4).compactMap { song -> UIImage? in
-            UIImage(contentsOfFile: song.coverImageURL.path)
+        let covers = playlist.songs.prefix(10).compactMap { song -> UIImage? in
+            guard let path = song.coverImageURL?.path else { return nil }
+            return UIImage(contentsOfFile: path)
         }
 
         return Group {
@@ -113,9 +134,8 @@ struct PlaylistDetailView: View {
             // Shuffle play
             Button {
                 guard !songs.isEmpty else { return }
-                var shuffled = songs
-                shuffled.shuffle()
-                player.play(song: shuffled[0], in: shuffled)
+                player.isShuffled = true
+                player.play(song: songs.randomElement()!, in: songs)
             } label: {
                 HStack {
                     Image(systemName: "shuffle")
@@ -131,6 +151,7 @@ struct PlaylistDetailView: View {
             // Play
             Button {
                 guard let first = songs.first else { return }
+                player.isShuffled = false
                 player.play(song: first, in: songs)
             } label: {
                 HStack {
@@ -151,7 +172,7 @@ struct PlaylistDetailView: View {
 
     // MARK: - Track List
     private var trackList: some View {
-        VStack(spacing: 0) {
+        Group {
             HStack {
                 Button {
                     showAddSongs = true
@@ -162,23 +183,41 @@ struct PlaylistDetailView: View {
                 }
                 Spacer()
             }
-            .padding(.horizontal, 16)
+            .listRowSeparator(.hidden)
             .padding(.bottom, 8)
 
             ForEach(Array(songs.enumerated()), id: \.element.id) { index, song in
-                SongRow(song: song, index: index + 1)
-                    .padding(.horizontal, 16)
+                let songData = playlist.songs[index]
+                SongRow(song: song, index: index + 1, onRemove: {
+                    dataManager.removeSong(songData, from: playlist)
+                })
+                    .contentShape(Rectangle())
                     .onTapGesture {
                         player.play(song: song, in: songs)
                     }
-
-                if index < songs.count - 1 {
-                    Divider()
-                        .padding(.leading, 76)
-                }
+                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
             }
+            .onDelete(perform: deleteSongs)
+            .onMove(perform: moveSongs)
+
+            // space for mini player
+            Color.clear
+                .frame(height: 100)
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
         }
-        .padding(.bottom, 100) // space for mini player
+    }
+
+    private func deleteSongs(at offsets: IndexSet) {
+        let songsToRemove = offsets.map { playlist.songs[$0] }
+        for songData in songsToRemove {
+            dataManager.removeSong(songData, from: playlist)
+        }
+    }
+
+    private func moveSongs(from source: IndexSet, to destination: Int) {
+        playlist.songs.move(fromOffsets: source, toOffset: destination)
+        try? dataManager.modelContext?.save()
     }
 }
 
@@ -188,9 +227,7 @@ struct AddSongsToPlaylistView: View {
     @ObservedObject var dataManager = DataManager.shared
     @Environment(\.dismiss) private var dismiss
 
-    var allSongs: [SongData] {
-        dataManager.fetchAllSongs()
-    }
+    @Query(sort: \SongData.dateAdded, order: .reverse) private var allSongs: [SongData]
 
     var body: some View {
         NavigationView {
@@ -199,12 +236,17 @@ struct AddSongsToPlaylistView: View {
 
                 HStack {
                     // Cover
-                    if let uiImage = UIImage(contentsOfFile: songData.coverImageURL.path) {
+                    if let path = songData.coverImageURL?.path, let uiImage = UIImage(contentsOfFile: path) {
                         Image(uiImage: uiImage)
                             .resizable()
                             .scaledToFill()
                             .frame(width: 44, height: 44)
                             .clipShape(RoundedRectangle(cornerRadius: 4))
+                    } else {
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.gray.opacity(0.3))
+                            .frame(width: 44, height: 44)
+                            .overlay(Image(systemName: "music.note").font(.caption))
                     }
 
                     VStack(alignment: .leading) {

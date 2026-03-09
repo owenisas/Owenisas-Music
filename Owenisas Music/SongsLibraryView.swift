@@ -4,9 +4,13 @@ import SwiftData
 struct SongsLibraryView: View {
     @ObservedObject var dataManager = DataManager.shared
     @ObservedObject var player = MusicPlayerManager.shared
-    @State private var allSongs: [SongData] = []
+
+    @Query(sort: \SongData.dateAdded, order: .reverse) private var allSongs: [SongData]
     @State private var searchText = ""
     @State private var sortOption: SortOption = .dateAdded
+    @State private var songToAddToPlaylist: SongData?
+    @State private var songToDelete: SongData?
+    @State private var showDeleteConfirmation = false
 
     enum SortOption: String, CaseIterable {
         case dateAdded = "Recently Added"
@@ -17,7 +21,6 @@ struct SongsLibraryView: View {
     var filteredSongs: [SongData] {
         var songs = allSongs
 
-        // Apply search filter
         if !searchText.isEmpty {
             songs = songs.filter {
                 $0.title.localizedCaseInsensitiveContains(searchText) ||
@@ -25,7 +28,6 @@ struct SongsLibraryView: View {
             }
         }
 
-        // Apply sort
         switch sortOption {
         case .dateAdded:
             songs.sort { $0.dateAdded > $1.dateAdded }
@@ -43,10 +45,10 @@ struct SongsLibraryView: View {
             if allSongs.isEmpty {
                 emptyState
             } else {
-                // Sort picker
+                // Sort bar
                 HStack {
                     Text("\(allSongs.count) Songs")
-                        .font(.subheadline)
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
 
                     Spacer()
@@ -54,7 +56,9 @@ struct SongsLibraryView: View {
                     Menu {
                         ForEach(SortOption.allCases, id: \.self) { option in
                             Button {
-                                sortOption = option
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    sortOption = option
+                                }
                             } label: {
                                 HStack {
                                     Text(option.rawValue)
@@ -67,10 +71,14 @@ struct SongsLibraryView: View {
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "arrow.up.arrow.down")
+                                .font(.system(size: 11, weight: .bold))
                             Text(sortOption.rawValue)
+                                .font(.system(size: 12, weight: .semibold))
                         }
-                        .font(.caption.bold())
                         .foregroundStyle(.green)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.green.opacity(0.1), in: Capsule())
                     }
                 }
                 .padding(.horizontal, 16)
@@ -80,16 +88,20 @@ struct SongsLibraryView: View {
                 List {
                     ForEach(filteredSongs, id: \.id) { songData in
                         let song = Song.from(songData)
-                        SongRow(song: song)
-                            .onTapGesture {
-                                let allAsSongs = dataManager.toSongs(filteredSongs)
-                                player.play(song: song, in: allAsSongs)
-                            }
-                            .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
+                        SongRow(song: song, onAdd: {
+                            songToAddToPlaylist = songData
+                        }, onRemove: {
+                            songToDelete = songData
+                            showDeleteConfirmation = true
+                        })
+                        .onTapGesture {
+                            let allAsSongs = dataManager.toSongs(filteredSongs)
+                            player.play(song: song, in: allAsSongs)
+                        }
+                        .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
                     }
                     .onDelete(perform: deleteSongs)
 
-                    // Bottom spacer for mini player
                     Color.clear
                         .frame(height: 80)
                         .listRowBackground(Color.clear)
@@ -100,32 +112,30 @@ struct SongsLibraryView: View {
         }
         .searchable(text: $searchText, prompt: "Search songs")
         .navigationTitle("Library")
-        .onAppear { refreshData() }
-        .onReceive(NotificationCenter.default.publisher(for: .init("SongsFolderChanged"))) { _ in
-            dataManager.syncFromFileSystem()
-            refreshData()
+        .sheet(item: $songToAddToPlaylist) { songData in
+            AddToPlaylistView(song: songData)
         }
-    }
-
-    private func refreshData() {
-        allSongs = dataManager.fetchAllSongs()
+        .alert("Delete Song", isPresented: $showDeleteConfirmation, presenting: songToDelete) { song in
+            Button("Delete", role: .destructive) { dataManager.deleteSong(song) }
+            Button("Cancel", role: .cancel) { songToDelete = nil }
+        } message: { song in
+            Text("Are you sure you want to delete '\(song.title)'? This will remove the files from your device.")
+        }
     }
 
     private func deleteSongs(at offsets: IndexSet) {
-        let songsToDelete = offsets.map { filteredSongs[$0] }
-        for song in songsToDelete {
-            dataManager.deleteSong(song)
+        if let index = offsets.first {
+            songToDelete = filteredSongs[index]
+            showDeleteConfirmation = true
         }
-        refreshData()
     }
 
     // MARK: - Empty State
     private var emptyState: some View {
         VStack(spacing: 16) {
             Spacer()
-
             Image(systemName: "music.note.house")
-                .font(.system(size: 60))
+                .font(.system(size: 56))
                 .foregroundStyle(
                     LinearGradient(
                         colors: [.green, .blue],
@@ -135,10 +145,10 @@ struct SongsLibraryView: View {
                 )
 
             Text("Your library is empty")
-                .font(.title3.bold())
+                .font(.system(size: 20, weight: .bold, design: .rounded))
 
             Text("Download songs from YouTube\nto start building your collection")
-                .font(.subheadline)
+                .font(.system(size: 14))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 

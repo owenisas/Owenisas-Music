@@ -13,8 +13,41 @@ class DataManager: ObservableObject {
     // MARK: - Setup
     func configure(with context: ModelContext) {
         self.modelContext = context
+        setupObservers()
     }
 
+    private func setupObservers() {
+        NotificationCenter.default.addObserver(forName: .init("SongPlayed"), object: nil, queue: .main) { [weak self] note in
+            guard let songId = note.object as? String else { return }
+            self?.markSongAsPlayed(songId: songId)
+        }
+        
+        NotificationCenter.default.addObserver(forName: .init("SongFavoriteToggled"), object: nil, queue: .main) { [weak self] note in
+            guard let songId = note.object as? String else { return }
+            self?.toggleFavorite(songId: songId)
+        }
+    }
+
+    private func markSongAsPlayed(songId: String) {
+        guard let ctx = modelContext else { return }
+        let descriptor = FetchDescriptor<SongData>(predicate: #Predicate { $0.id == songId })
+        if let song = (try? ctx.fetch(descriptor))?.first {
+            song.lastPlayedDate = .now
+            try? ctx.save()
+        }
+    }
+
+    private func toggleFavorite(songId: String) {
+        guard let ctx = modelContext else { return }
+        let descriptor = FetchDescriptor<SongData>(predicate: #Predicate { $0.id == songId })
+        if let song = (try? ctx.fetch(descriptor))?.first {
+            song.isFavorited.toggle()
+            try? ctx.save()
+        }
+    }
+
+    // MARK: - Sync file system → SwiftData
+    /// Scans Documents/Songs/ and upserts into SwiftData
     // MARK: - Sync file system → SwiftData
     /// Scans Documents/Songs/ and upserts into SwiftData
     func syncFromFileSystem() {
@@ -23,7 +56,6 @@ class DataManager: ObservableObject {
         guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
         let songsFolder = docs.appendingPathComponent("Songs")
 
-        // Create folder if needed
         if !fm.fileExists(atPath: songsFolder.path) {
             try? fm.createDirectory(at: songsFolder, withIntermediateDirectories: true)
         }
@@ -34,62 +66,66 @@ class DataManager: ObservableObject {
             options: [.skipsHiddenFiles]
         ) else { return }
 
-        var foundIDs: Set<String> = []
-
-        for folder in subfolders {
-            var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: folder.path, isDirectory: &isDir), isDir.boolValue else { continue }
-
-            let folderName = folder.lastPathComponent
-            foundIDs.insert(folderName)
-
-            guard let contents = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { continue }
-
-            let audioExts = ["mp3", "wav", "m4a", "aac", "flac"]
-            let imageExts = ["jpg", "jpeg", "png", "webp"]
-            let subExts = ["vtt", "srv1", "txt"]
-
-            let audioFile = contents.first { audioExts.contains($0.pathExtension.lowercased()) }
-            let coverFile = contents.first { imageExts.contains($0.pathExtension.lowercased()) }
-            let subtitleFile = contents.first { subExts.contains($0.pathExtension.lowercased()) }
-
-            guard let audio = audioFile, let cover = coverFile else { continue }
-
-            let audioRelPath = "Songs/\(folderName)/\(audio.lastPathComponent)"
-            let coverRelPath = "Songs/\(folderName)/\(cover.lastPathComponent)"
-            let subtitleRelPath = subtitleFile != nil ? "Songs/\(folderName)/\(subtitleFile!.lastPathComponent)" : nil
-
-            // Check if already exists
-            let descriptor = FetchDescriptor<SongData>(predicate: #Predicate { $0.id == folderName })
-            let existing = (try? ctx.fetch(descriptor))?.first
-
-            if let song = existing {
-                // Update paths if changed
-                song.audioFilePath = audioRelPath
-                song.coverImagePath = coverRelPath
-                song.subtitleFilePath = subtitleRelPath
-            } else {
-                let song = SongData(
-                    id: folderName,
-                    title: folderName,
-                    audioFilePath: audioRelPath,
-                    coverImagePath: coverRelPath,
-                    subtitleFilePath: subtitleRelPath
-                )
-                ctx.insert(song)
-            }
-        }
-
-        // Remove songs whose folders were deleted
         let allDescriptor = FetchDescriptor<SongData>()
-        if let allSongs = try? ctx.fetch(allDescriptor) {
-            for song in allSongs {
-                if !foundIDs.contains(song.id) {
-                    ctx.delete(song)
-                }
+        let existingSongs = (try? ctx.fetch(allDescriptor)) ?? []
+        let foundIDs = Set(subfolders.map { $0.lastPathComponent })
+        
+        // 1. Remove missing
+        for song in existingSongs {
+            if !foundIDs.contains(song.id) {
+                ctx.delete(song)
             }
         }
 
+        // 2. Sync each existing folder
+        for folder in subfolders {
+            syncSingleSong(folderName: folder.lastPathComponent)
+        }
+
+        try? ctx.save()
+    }
+
+    /// Surgically syncs a single song folder. Much faster for incremental updates.
+    func syncSingleSong(folderName: String) {
+        guard let ctx = modelContext else { return }
+        let fm = FileManager.default
+        guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        let songFolder = docs.appendingPathComponent("Songs").appendingPathComponent(folderName)
+
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: songFolder.path, isDirectory: &isDir), isDir.boolValue else { return }
+
+        guard let contents = try? fm.contentsOfDirectory(at: songFolder, includingPropertiesForKeys: nil) else { return }
+
+        let audioExts = ["mp3", "wav", "m4a", "aac", "flac"]
+        let imageExts = ["jpg", "jpeg", "png", "webp"]
+        let subExts = ["vtt", "srv1", "txt"]
+
+        let audioFile = contents.first { audioExts.contains($0.pathExtension.lowercased()) }
+        let coverFile = contents.first { imageExts.contains($0.pathExtension.lowercased()) }
+        let subtitleFile = contents.first { subExts.contains($0.pathExtension.lowercased()) }
+
+        guard let audio = audioFile else { return }
+
+        let audioRelPath = "Songs/\(folderName)/\(audio.lastPathComponent)"
+        let coverRelPath = coverFile != nil ? "Songs/\(folderName)/\(coverFile!.lastPathComponent)" : nil
+        let subtitleRelPath = subtitleFile != nil ? "Songs/\(folderName)/\(subtitleFile!.lastPathComponent)" : nil
+
+        let descriptor = FetchDescriptor<SongData>(predicate: #Predicate { $0.id == folderName })
+        if let existing = (try? ctx.fetch(descriptor))?.first {
+            if existing.audioFilePath != audioRelPath { existing.audioFilePath = audioRelPath }
+            if existing.coverImagePath != coverRelPath { existing.coverImagePath = coverRelPath }
+            if existing.subtitleFilePath != subtitleRelPath { existing.subtitleFilePath = subtitleRelPath }
+        } else {
+            let song = SongData(
+                id: folderName,
+                title: folderName,
+                audioFilePath: audioRelPath,
+                coverImagePath: coverRelPath,
+                subtitleFilePath: subtitleRelPath
+            )
+            ctx.insert(song)
+        }
         try? ctx.save()
     }
 
@@ -130,6 +166,20 @@ class DataManager: ObservableObject {
         }
     }
 
+    func addSongs(_ songs: [SongData], to playlist: PlaylistData) {
+        var added = false
+        for song in songs {
+            if !playlist.songs.contains(where: { $0.id == song.id }) {
+                playlist.songs.append(song)
+                added = true
+            }
+        }
+        if added {
+            try? modelContext?.save()
+            NotificationCenter.default.post(name: .init("PlaylistsChanged"), object: nil)
+        }
+    }
+
     func removeSong(_ song: SongData, from playlist: PlaylistData) {
         playlist.songs.removeAll { $0.id == song.id }
         try? modelContext?.save()
@@ -150,16 +200,22 @@ class DataManager: ObservableObject {
 
     // MARK: - Song deletion
     func deleteSong(_ song: SongData) {
+        // 1. Stop playback if this song is playing
+        MusicPlayerManager.shared.stopAndRemoveFromQueue(songId: song.id)
+
         let fm = FileManager.default
         guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
         let songFolder = docs.appendingPathComponent("Songs").appendingPathComponent(song.id)
 
-        // Remove from filesystem
+        // 2. Remove from filesystem - do this FIRST
         try? fm.removeItem(at: songFolder)
 
-        // Remove from SwiftData
+        // 3. Remove from SwiftData
         modelContext?.delete(song)
         try? modelContext?.save()
+        
+        // 4. Force UI refresh
+        NotificationCenter.default.post(name: .init("SongsFolderChanged"), object: nil)
     }
 
     // MARK: - Convert SongData → Song (lightweight struct for player)

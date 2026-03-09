@@ -6,10 +6,9 @@ struct CreatePlaylistView: View {
     @Environment(\.dismiss) var dismiss
     @State private var playlistName = ""
     @State private var selectedSongIDs: Set<String> = []
+    @FocusState private var isNameFieldFocused: Bool
 
-    var allSongs: [SongData] {
-        dataManager.fetchAllSongs()
-    }
+    @Query(sort: \SongData.dateAdded, order: .reverse) private var allSongs: [SongData]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,10 +31,19 @@ struct CreatePlaylistView: View {
                     )
                     .shadow(color: .green.opacity(0.3), radius: 12, x: 0, y: 6)
 
-                TextField("Playlist Name", text: $playlistName)
-                    .font(.title2.bold())
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 32)
+                VStack(spacing: 6) {
+                    TextField("Enter Playlist Name", text: $playlistName)
+                        .font(.title2.bold())
+                        .multilineTextAlignment(.center)
+                        .focused($isNameFieldFocused)
+                        .padding(.horizontal, 32)
+                    
+                    if playlistName.isEmpty {
+                        Text("Name is required")
+                            .font(.caption)
+                            .foregroundStyle(.secondary.opacity(0.7))
+                    }
+                }
             }
             .padding(.top, 24)
             .padding(.bottom, 20)
@@ -66,7 +74,7 @@ struct CreatePlaylistView: View {
 
                     HStack(spacing: 12) {
                         // Cover
-                        if let uiImage = UIImage(contentsOfFile: songData.coverImageURL.path) {
+                        if let path = songData.coverImageURL?.path, let uiImage = UIImage(contentsOfFile: path) {
                             Image(uiImage: uiImage)
                                 .resizable()
                                 .scaledToFill()
@@ -117,10 +125,13 @@ struct CreatePlaylistView: View {
                 Button("Create") {
                     createPlaylist()
                 }
-                .font(.headline)
-                .foregroundStyle(.green)
+                .font(.headline.bold())
+                .foregroundStyle(playlistName.isEmpty ? AnyShapeStyle(.secondary) : AnyShapeStyle(.green))
                 .disabled(playlistName.trimmingCharacters(in: .whitespaces).isEmpty)
             }
+        }
+        .onAppear {
+            isNameFieldFocused = true
         }
     }
 
@@ -132,9 +143,7 @@ struct CreatePlaylistView: View {
         let coverPath = songs.first?.coverImagePath
 
         if let playlist = dataManager.createPlaylist(title: trimmed, coverImagePath: coverPath) {
-            for song in songs {
-                dataManager.addSong(song, to: playlist)
-            }
+            dataManager.addSongs(songs, to: playlist)
         }
         
         dismiss()

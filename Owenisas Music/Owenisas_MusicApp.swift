@@ -22,41 +22,36 @@ struct Owenisas_MusicApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ZStack(alignment: .bottom) {
-                TabView {
-                    NavigationView {
-                        ContentView()
-                    }
-                    .tabItem {
-                        Image(systemName: "house.fill")
-                        Text("Home")
-                    }
-
-                    NavigationView {
-                        SongsLibraryView()
-                    }
-                    .tabItem {
-                        Image(systemName: "music.note.list")
-                        Text("Library")
-                    }
-
-                    NavigationView {
-                        DownloadView()
-                    }
-                    .tabItem {
-                        Image(systemName: "arrow.down.circle.fill")
-                        Text("Download")
-                    }
+            TabView {
+                NavigationStack {
+                    ContentView()
                 }
-                .tint(.green)
-
-                // Global Mini Player (above tab bar)
-                VStack(spacing: 0) {
-                    Spacer()
-                    MiniPlayerView()
-                        .padding(.bottom, 50) // tab bar height
+                .tabItem {
+                    Image(systemName: "house.fill")
+                    Text("Home")
                 }
-                .ignoresSafeArea(.keyboard)
+
+                NavigationStack {
+                    SongsLibraryView()
+                }
+                .tabItem {
+                    Image(systemName: "music.note.list")
+                    Text("Library")
+                }
+
+                NavigationStack {
+                    DownloadView()
+                }
+                .tabItem {
+                    Image(systemName: "arrow.down.circle.fill")
+                    Text("Download")
+                }
+            }
+            .tint(.green)
+            .overlay(alignment: .bottom) {
+                // Position mini player just above the tab bar
+                MiniPlayerView()
+                    .padding(.bottom, 50) // standard tab bar height
             }
             .fullScreenCover(isPresented: $player.showFullPlayer) {
                 NowPlayingView()
@@ -66,17 +61,30 @@ struct Owenisas_MusicApp: App {
                 dataManager.configure(with: sharedModelContainer.mainContext)
                 createSongsFolderIfNeeded()
                 dataManager.syncFromFileSystem()
+                cleanupTemporaryFiles()
             }
             .modelContainer(sharedModelContainer)
         }
     }
 
     private func setupAppearance() {
-        // Dark-tinted tab bar
+        // Modern translucent tab bar
         let tabBarAppearance = UITabBarAppearance()
         tabBarAppearance.configureWithDefaultBackground()
         UITabBar.appearance().standardAppearance = tabBarAppearance
         UITabBar.appearance().scrollEdgeAppearance = tabBarAppearance
+
+        // Navigation bar styling
+        let navAppearance = UINavigationBarAppearance()
+        navAppearance.configureWithDefaultBackground()
+        navAppearance.largeTitleTextAttributes = [
+            .font: UIFont.systemFont(ofSize: 32, weight: .bold)
+        ]
+        navAppearance.titleTextAttributes = [
+            .font: UIFont.systemFont(ofSize: 17, weight: .semibold)
+        ]
+        UINavigationBar.appearance().standardAppearance = navAppearance
+        UINavigationBar.appearance().scrollEdgeAppearance = navAppearance
     }
 
     private func createSongsFolderIfNeeded() {
@@ -85,6 +93,30 @@ struct Owenisas_MusicApp: App {
         let songsFolder = docs.appendingPathComponent("Songs")
         if !fm.fileExists(atPath: songsFolder.path) {
             try? fm.createDirectory(at: songsFolder, withIntermediateDirectories: true)
+        }
+    }
+
+    private func cleanupTemporaryFiles() {
+        DispatchQueue.global(qos: .background).async {
+            let fm = FileManager.default
+            guard let cacheURL = fm.urls(for: .cachesDirectory, in: .userDomainMask).first else { return }
+            
+            guard let files = try? fm.contentsOfDirectory(at: cacheURL, includingPropertiesForKeys: [.creationDateKey]) else { return }
+            
+            let expirationDate = Date().addingTimeInterval(-2 * 60 * 60) // 2 hours ago
+            
+            for file in files {
+                do {
+                    let attrs = try fm.attributesOfItem(atPath: file.path)
+                    if let creationDate = attrs[.creationDate] as? Date {
+                        if creationDate < expirationDate {
+                            try fm.removeItem(at: file)
+                        }
+                    }
+                } catch {
+                    // Ignore errors for system files that can't be deleted
+                }
+            }
         }
     }
 }

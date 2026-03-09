@@ -4,12 +4,16 @@ struct SongRow: View {
     let song: Song
     let index: Int?
     var showAlbumArt: Bool = true
+    var onAdd: (() -> Void)?
+    var onRemove: (() -> Void)?
     @ObservedObject var playerManager = MusicPlayerManager.shared
 
-    init(song: Song, index: Int? = nil, showAlbumArt: Bool = true) {
+    init(song: Song, index: Int? = nil, showAlbumArt: Bool = true, onAdd: (() -> Void)? = nil, onRemove: (() -> Void)? = nil) {
         self.song = song
         self.index = index
         self.showAlbumArt = showAlbumArt
+        self.onAdd = onAdd
+        self.onRemove = onRemove
     }
 
     private var isCurrentlyPlaying: Bool {
@@ -18,55 +22,71 @@ struct SongRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // Track number or album art
             if let idx = index, !showAlbumArt {
                 Text("\(idx)")
-                    .font(.subheadline)
+                    .font(.system(size: 14, weight: .medium, design: .monospaced))
                     .foregroundStyle(isCurrentlyPlaying ? .green : .secondary)
                     .frame(width: 28)
             }
 
             if showAlbumArt {
-                coverImage
+                CachedCoverImage(song.coverImageURL, size: 48, cornerRadius: 8)
             }
 
-            // Song info
             VStack(alignment: .leading, spacing: 3) {
                 Text(song.title)
-                    .font(.body.weight(.medium))
+                    .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(isCurrentlyPlaying ? .green : .primary)
                     .lineLimit(1)
 
                 Text(song.artist)
-                    .font(.caption)
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
 
             Spacer()
 
-            // Playing indicator
             if isCurrentlyPlaying && playerManager.isPlaying {
                 NowPlayingBars()
                     .frame(width: 20, height: 16)
             }
 
-            // More button
             Menu {
                 Button {
-                    // Add to playlist - handled by parent
+                    playerManager.playNext(song)
                 } label: {
-                    Label("Add to Playlist", systemImage: "text.badge.plus")
+                    Label("Play Next", systemImage: "text.insert")
                 }
 
-                Button(role: .destructive) {
-                    // Delete - handled by parent
+                Button {
+                    playerManager.addToQueue(song)
                 } label: {
-                    Label("Remove", systemImage: "trash")
+                    Label("Add to Queue", systemImage: "text.append")
+                }
+
+                if onAdd != nil || onRemove != nil {
+                    Divider()
+                }
+
+                if let onAdd = onAdd {
+                    Button {
+                        onAdd()
+                    } label: {
+                        Label("Add to Playlist", systemImage: "text.badge.plus")
+                    }
+                }
+
+                if let onRemove = onRemove {
+                    Button(role: .destructive) {
+                        onRemove()
+                    } label: {
+                        Label("Remove", systemImage: "trash")
+                    }
                 }
             } label: {
                 Image(systemName: "ellipsis")
-                    .font(.body)
+                    .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                     .frame(width: 32, height: 32)
             }
@@ -74,53 +94,26 @@ struct SongRow: View {
         .padding(.vertical, 4)
         .contentShape(Rectangle())
     }
-
-    private var coverImage: some View {
-        Group {
-            if let uiImage = UIImage(contentsOfFile: song.coverImageURL.path) {
-                Image(uiImage: uiImage)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: 48, height: 48)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-            } else {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(
-                        LinearGradient(
-                            colors: [.gray.opacity(0.4), .gray.opacity(0.2)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 48, height: 48)
-                    .overlay(
-                        Image(systemName: "music.note")
-                            .foregroundStyle(.white.opacity(0.6))
-                    )
-            }
-        }
-    }
 }
 
 // MARK: - Animated "Now Playing" Bars
 struct NowPlayingBars: View {
-    @State private var animate = false
+    @State private var heights: [CGFloat] = [0.4, 0.6, 0.3]
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(0..<3, id: \.self) { i in
-                RoundedRectangle(cornerRadius: 1)
+                RoundedRectangle(cornerRadius: 1.5)
                     .fill(.green)
                     .frame(width: 3)
-                    .scaleEffect(y: animate ? CGFloat.random(in: 0.3...1.0) : 0.4, anchor: .bottom)
+                    .scaleEffect(y: heights[i], anchor: .bottom)
             }
         }
         .onAppear {
-            withAnimation(
-                .easeInOut(duration: 0.5)
-                .repeatForever(autoreverses: true)
-            ) {
-                animate = true
+            Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in
+                withAnimation(.easeInOut(duration: 0.35)) {
+                    heights = (0..<3).map { _ in CGFloat.random(in: 0.25...1.0) }
+                }
             }
         }
     }
