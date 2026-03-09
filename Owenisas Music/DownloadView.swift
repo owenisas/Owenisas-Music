@@ -259,6 +259,14 @@ struct DownloadView: View {
                 self.sendProgressNotification(message: "Downloading: \(safeTitle)")
             }
 
+            let existingSongs = self.dataManager.fetchAllSongs()
+            if existingSongs.contains(where: { $0.id == safeTitle }) {
+                DispatchQueue.main.async {
+                    self.finishSuccess("✅ \"\(safeTitle)\" already exists in library!")
+                }
+                return
+            }
+
             guard let audioURL = URL(string: meta.audioUrl) else {
                 showError("Error", "Invalid audio URL")
                 return
@@ -400,6 +408,18 @@ struct DownloadView: View {
             statusMessage = "⬇️ (\(index+1)/\(videos.count)) \"\(safeTitle)\""
             downloadProgress = Double(index) / Double(videos.count)
             self.sendProgressNotification(message: "Downloading \(index+1) of \(videos.count)\n\(safeTitle)")
+        }
+
+        // Check if the song has already been downloaded (skip duplicate downloads)
+        let existingSongs = dataManager.fetchAllSongs()
+        if existingSongs.contains(where: { $0.id == safeTitle }) {
+            DispatchQueue.main.async {
+                self.downloadedCount += 1
+                self.downloadedTrackTitles.append(safeTitle)
+            }
+            // Skip and move to next track
+            self.downloadPlaylistTracks(videos, index: index + 1)
+            return
         }
 
         guard let audioURL = URL(string: meta.audioUrl) else {
