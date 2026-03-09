@@ -3,7 +3,7 @@ import SwiftData
 
 struct CreatePlaylistView: View {
     @ObservedObject var dataManager = DataManager.shared
-    @Environment(\.presentationMode) var presentationMode
+    @Environment(\.dismiss) var dismiss
     @State private var playlistName = ""
     @State private var selectedSongIDs: Set<String> = []
 
@@ -128,14 +128,15 @@ struct CreatePlaylistView: View {
         let trimmed = playlistName.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
 
-        if let playlist = dataManager.createPlaylist(title: trimmed) {
-            let songs = allSongs.filter { selectedSongIDs.contains($0.id) }
+        let songs = allSongs.filter { selectedSongIDs.contains($0.id) }
+        let coverPath = songs.first?.coverImagePath
+
+        if let playlist = dataManager.createPlaylist(title: trimmed, coverImagePath: coverPath) {
             for song in songs {
                 dataManager.addSong(song, to: playlist)
             }
         }
         
-        // Use presentationMode instead of dismiss() to ensure it pops properly
-        presentationMode.wrappedValue.dismiss()
+        dismiss()
     }
 }
