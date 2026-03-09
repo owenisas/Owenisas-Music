@@ -75,7 +75,7 @@ def download_audio():
     
     try:
         run_yt_dlp([
-            '-x', '--audio-format', 'mp3', '--audio-quality', '192K',
+            '-x', '--audio-format', 'mp3',
             '--ffmpeg-location', '/usr/bin',
             '-o', outtmpl,
             '--sleep-requests', '1',
