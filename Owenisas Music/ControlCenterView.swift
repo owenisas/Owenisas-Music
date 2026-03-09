@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MiniPlayerView: View {
     @ObservedObject var player = MusicPlayerManager.shared
+    @State private var localCurrentTime: TimeInterval = 0
 
     var body: some View {
         if let song = player.currentSong {
@@ -69,6 +70,11 @@ struct MiniPlayerView: View {
             .onTapGesture {
                 player.showFullPlayer = true
             }
+            .onReceive(Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()) { _ in
+                if UIApplication.shared.applicationState == .active {
+                    localCurrentTime = player.currentTime
+                }
+            }
             .transition(.asymmetric(
                 insertion: .move(edge: .bottom).combined(with: .opacity),
                 removal: .opacity
@@ -84,6 +90,7 @@ struct MiniPlayerView: View {
                 .scaledToFill()
                 .blur(radius: 40)
                 .overlay(Color.black.opacity(0.65))
+                .drawingGroup()
         } else {
             Color(white: 0.1)
         }
@@ -91,6 +98,6 @@ struct MiniPlayerView: View {
 
     private var progressFraction: Double {
         guard player.duration > 0 else { return 0 }
-        return player.currentTime / player.duration
+        return localCurrentTime / player.duration
     }
 }

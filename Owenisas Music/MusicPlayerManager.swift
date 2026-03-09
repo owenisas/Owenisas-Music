@@ -29,7 +29,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
     // MARK: – Published State
     @Published var isPlaying = false
     @Published var currentSong: Song?
-    @Published var currentTime: TimeInterval = 0
+    var currentTime: TimeInterval = 0 // No longer @Published to save global CPU/battery
     @Published var duration: TimeInterval = 0
     @Published var isShuffled = false
     @Published var repeatMode: RepeatMode = .off
@@ -43,6 +43,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
     /// The active queue (may be shuffled)
     @Published var queue: [Song] = []
     @Published var currentIndex: Int = 0
+    private var backgroundTicks = 0
 
     /// Public read-only playlist access
     var playlist: [Song] { queue }
@@ -365,11 +366,12 @@ class MusicPlayerManager: NSObject, ObservableObject {
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self = self, let p = self.player else { return }
+                
                 self.currentTime = p.currentTime
                 
                 // Auto-next logic: If near end and crossfade enabled
                 if self.crossfadeEnabled && (p.duration - p.currentTime) < self.crossfadeDuration && !p.isLooping {
-                    // Start preparing next? Actually AVAudioPlayerDidFinishPlaying is safer for basic flow.
+                    // Start preparing next...
                 }
             }
     }

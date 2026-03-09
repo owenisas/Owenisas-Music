@@ -15,6 +15,7 @@ struct NowPlayingView: View {
     
     @AppStorage("preferredLyricsLanguage") private var preferredLyricsLanguage: String = ""
     @State private var showLanguagePicker = false
+    @State private var localCurrentTime: TimeInterval = 0
 
     var body: some View {
         GeometryReader { geo in
@@ -54,8 +55,11 @@ struct NowPlayingView: View {
             loadLyrics()
             loadCoverImage()
         }
-        .onReceive(player.$currentTime.throttle(for: .seconds(0.5), scheduler: RunLoop.main, latest: true)) { time in
-            updateActiveLyric(time: time)
+        .onReceive(Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()) { _ in
+            if UIApplication.shared.applicationState == .active {
+                localCurrentTime = player.currentTime
+                updateActiveLyric(time: localCurrentTime)
+            }
         }
         .gesture(dismissDrag)
         .offset(y: dragOffset)
@@ -264,7 +268,7 @@ struct NowPlayingView: View {
     private var progressSection: some View {
         VStack(spacing: 6) {
             GeometryReader { geo in
-                let progress = player.duration > 0 ? player.currentTime / player.duration : 0
+                let progress = player.duration > 0 ? localCurrentTime / player.duration : 0
                 let fillWidth = geo.size.width * CGFloat(min(progress, 1.0))
 
                 ZStack(alignment: .leading) {
@@ -301,11 +305,11 @@ struct NowPlayingView: View {
             .frame(height: 14)
 
             HStack {
-                Text(MusicPlayerManager.formatTime(player.currentTime))
+                Text(MusicPlayerManager.formatTime(localCurrentTime))
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.45))
                 Spacer()
-                Text("-" + MusicPlayerManager.formatTime(max(player.duration - player.currentTime, 0)))
+                Text("-" + MusicPlayerManager.formatTime(max(player.duration - localCurrentTime, 0)))
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.45))
             }
