@@ -259,6 +259,14 @@ struct DownloadView: View {
                 self.sendProgressNotification(message: "Downloading: \(safeTitle)")
             }
 
+            guard let audioURL = URL(string: meta.audioUrl) else {
+                showError("Error", "Invalid audio URL")
+                return
+            }
+            
+            let coverURLStr = meta.coverUrl.isEmpty ? nil : meta.coverUrl
+            let coverURL = coverURLStr != nil ? URL(string: coverURLStr!) : nil
+
             // Download audio
             let continueWithAudio = { (localCover: URL?) in
                 self.download(from: audioURL) { localAudio in

@@ -149,6 +149,7 @@ def video_info():
 @app.route("/playlist-info")
 def playlist_info():
     import json
+    import urllib.request
     """Return metadata for every video in a YouTube playlist."""
     playlist_id = request.args.get("id")
     if not playlist_id:
@@ -167,7 +168,18 @@ def playlist_info():
         
         # Try finding a high-res thumbnail for the entire playlist
         thumbs = result.get("thumbnails", [])
-        playlist_cover = thumbs[-1].get("url") if thumbs else ""
+        playlist_cover = ""
+        for t in reversed(thumbs):
+            url = t.get("url")
+            if url:
+                try:
+                    req = urllib.request.Request(url, method='HEAD')
+                    with urllib.request.urlopen(req, timeout=3) as res:
+                        if res.status == 200:
+                            playlist_cover = url
+                            break
+                except Exception:
+                    pass
 
         entries         = result.get("entries", [])
 
