@@ -164,6 +164,11 @@ def playlist_info():
 
         playlist_title  = result.get("title", "Unknown Playlist")
         playlist_artist = result.get("uploader") or result.get("channel") or "Unknown Artist"
+        
+        # Try finding a high-res thumbnail for the entire playlist
+        thumbs = result.get("thumbnails", [])
+        playlist_cover = thumbs[-1].get("url") if thumbs else ""
+
         entries         = result.get("entries", [])
 
         videos = []
@@ -188,9 +193,10 @@ def playlist_info():
             })
 
         return jsonify({
-            "title":   playlist_title,
-            "artist":  playlist_artist,
-            "videos":  videos,
+            "title":    playlist_title,
+            "artist":   playlist_artist,
+            "coverUrl": playlist_cover,
+            "videos":   videos,
         })
     except subprocess.CalledProcessError as e:
         return jsonify({"error": f"Playlist fetch failed: {e.output.decode()}"}), 500

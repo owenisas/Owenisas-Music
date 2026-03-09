@@ -13,6 +13,7 @@ struct DownloadView: View {
     @FocusState private var linkFieldIsFocused: Bool
     
     @State private var targetPlaylistName: String? = nil
+    @State private var targetPlaylistCover: String? = nil
     @State private var downloadedTrackTitles: [String] = []
 
     @ObservedObject var dataManager = DataManager.shared
@@ -192,6 +193,7 @@ struct DownloadView: View {
         downloadedCount = 0
         totalCount = 0
         targetPlaylistName = nil
+        targetPlaylistCover = nil
         downloadedTrackTitles = []
 
         // Check if it's a playlist link
@@ -333,6 +335,7 @@ struct DownloadView: View {
                 totalCount = playlist.videos.count
                 statusMessage = "📋 Found \(totalCount) tracks in \"\(playlist.title)\""
                 targetPlaylistName = playlist.title
+                targetPlaylistCover = playlist.coverUrl
             }
 
             // Download each track sequentially
@@ -366,8 +369,15 @@ struct DownloadView: View {
             return
         }
 
-        let coverURLStr = meta.coverUrl.isEmpty ? nil : meta.coverUrl
-        let coverURL = coverURLStr != nil ? URL(string: coverURLStr!) : nil
+        // Try track cover first, fallback to playlist cover, then nil
+        var finalCoverStr: String? = nil
+        if !meta.coverUrl.isEmpty {
+            finalCoverStr = meta.coverUrl
+        } else if let pCover = targetPlaylistCover, !pCover.isEmpty {
+            finalCoverStr = pCover
+        }
+        
+        let coverURL = finalCoverStr != nil ? URL(string: finalCoverStr!) : nil
 
         let continueWithAudio = { (localCover: URL?) in
             self.download(from: audioURL) { localAudio in
@@ -442,6 +452,7 @@ struct DownloadView: View {
     struct PlaylistInfo: Decodable {
         let title: String
         let artist: String?
+        let coverUrl: String?
         let videos: [VideoInfo]
     }
 
