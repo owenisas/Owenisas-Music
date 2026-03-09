@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 struct DownloadView: View {
     @State private var youtubeLink = ""
@@ -15,6 +16,8 @@ struct DownloadView: View {
     @State private var targetPlaylistName: String? = nil
     @State private var targetPlaylistCover: String? = nil
     @State private var downloadedTrackTitles: [String] = []
+    
+    @State private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
     @ObservedObject var dataManager = DataManager.shared
 
@@ -204,6 +207,15 @@ struct DownloadView: View {
         targetPlaylistCover = nil
         downloadedTrackTitles = []
 
+        // Request notification auth
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        
+        // Start background task bound to download process
+        backgroundTask = UIApplication.shared.beginBackgroundTask {
+            UIApplication.shared.endBackgroundTask(self.backgroundTask)
+            self.backgroundTask = .invalid
+        }
+
         // Check if it's a playlist link
         if isPlaylistLink(link) {
             statusMessage = "🔍 Fetching playlist info…"
@@ -244,6 +256,7 @@ struct DownloadView: View {
             DispatchQueue.main.async {
                 statusMessage = "🎶 Downloading \"\(safeTitle)\"…"
                 downloadProgress = 0.2
+                self.sendProgressNotification(message: "Downloading: \(safeTitle)")
             }
 
             // Download audio
@@ -378,6 +391,7 @@ struct DownloadView: View {
         DispatchQueue.main.async {
             statusMessage = "⬇️ (\(index+1)/\(videos.count)) \"\(safeTitle)\""
             downloadProgress = Double(index) / Double(videos.count)
+            self.sendProgressNotification(message: "Downloading \(index+1) of \(videos.count)\n\(safeTitle)")
         }
 
         guard let audioURL = URL(string: meta.audioUrl) else {
@@ -536,6 +550,9 @@ struct DownloadView: View {
         // Haptic feedback
         let generator = UINotificationFeedbackGenerator()
         generator.notificationOccurred(.success)
+        
+        sendCompletionNotification(message: message)
+        endBackgroundTask()
     }
 
     func showError(_ title: String, _ message: String) {
@@ -544,6 +561,16 @@ struct DownloadView: View {
             alertMessage = message
             showAlert = true
             isDownloading = false
+            
+            self.sendCompletionNotification(message: "Error: \(message)")
+            self.endBackgroundTask()
+        }
+    }
+    
+    private func endBackgroundTask() {
+        if backgroundTask != .invalid {
+            UIApplication.shared.endBackgroundTask(backgroundTask)
+            backgroundTask = .invalid
         }
     }
 
@@ -589,5 +616,25 @@ struct DownloadView: View {
                 }
             }
         }.resume()
+    }
+
+    private func sendProgressNotification(message: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Music Download"
+        content.body = message
+        content.sound = nil // silent for progress updates
+        
+        let request = UNNotificationRequest(identifier: "download_progress", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+    
+    private func sendCompletionNotification(message: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Download Update"
+        content.body = message
+        content.sound = .default
+        
+        let request = UNNotificationRequest(identifier: "download_progress", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
     }
 }
