@@ -1,0 +1,40 @@
+# Generic
+.DS_Store
+.env
+
+# Xcode
+build/
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata/
+*.xccheckout
+*.moved-aside
+DerivedData/
+*.hmap
+*.ipa
+*.xcuserstate
+
+# CocoaPods
+Pods/
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# Python / Backend
+__pycache__/
+*.pyc
+youtube_cookies.txt
+backend/node-v20.11.1-linux-x64/
+backend/node.tar.xz
+backend/yt-dlp
+
+node-v20.11.1-linux-x64.tar.xz

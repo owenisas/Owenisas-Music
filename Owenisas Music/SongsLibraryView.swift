@@ -1,130 +1,149 @@
 import SwiftUI
-
-extension Notification.Name {
-    /// Posted by MusicPlayerManager when a track finishes
-    static let audioFinished = Notification.Name("AudioFinished")
-}
+import SwiftData
 
 struct SongsLibraryView: View {
-    @State private var songs: [Song] = []
-    @ObservedObject private var playerManager = MusicPlayerManager.shared
+    @ObservedObject var dataManager = DataManager.shared
+    @ObservedObject var player = MusicPlayerManager.shared
+    @State private var allSongs: [SongData] = []
+    @State private var searchText = ""
+    @State private var sortOption: SortOption = .dateAdded
+
+    enum SortOption: String, CaseIterable {
+        case dateAdded = "Recently Added"
+        case title = "Title"
+        case artist = "Artist"
+    }
+
+    var filteredSongs: [SongData] {
+        var songs = allSongs
+
+        // Apply search filter
+        if !searchText.isEmpty {
+            songs = songs.filter {
+                $0.title.localizedCaseInsensitiveContains(searchText) ||
+                $0.artist.localizedCaseInsensitiveContains(searchText)
+            }
+        }
+
+        // Apply sort
+        switch sortOption {
+        case .dateAdded:
+            songs.sort { $0.dateAdded > $1.dateAdded }
+        case .title:
+            songs.sort { $0.title.localizedCompare($1.title) == .orderedAscending }
+        case .artist:
+            songs.sort { $0.artist.localizedCompare($1.artist) == .orderedAscending }
+        }
+
+        return songs
+    }
 
     var body: some View {
-        NavigationView {
-            VStack(spacing: 20) {
-                if songs.isEmpty {
-                    Text("No songs found.\nPlease add song folders to the 'Songs' folder in Files.")
-                        .multilineTextAlignment(.center)
-                        .padding()
-                } else {
-                    List(songs) { song in
+        VStack(spacing: 0) {
+            if allSongs.isEmpty {
+                emptyState
+            } else {
+                // Sort picker
+                HStack {
+                    Text("\(allSongs.count) Songs")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Menu {
+                        ForEach(SortOption.allCases, id: \.self) { option in
+                            Button {
+                                sortOption = option
+                            } label: {
+                                HStack {
+                                    Text(option.rawValue)
+                                    if sortOption == option {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.up.arrow.down")
+                            Text(sortOption.rawValue)
+                        }
+                        .font(.caption.bold())
+                        .foregroundStyle(.green)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+
+                // Song list
+                List {
+                    ForEach(filteredSongs, id: \.id) { songData in
+                        let song = Song.from(songData)
                         SongRow(song: song)
+                            .onTapGesture {
+                                let allAsSongs = dataManager.toSongs(filteredSongs)
+                                player.play(song: song, in: allAsSongs)
+                            }
+                            .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
                     }
+                    .onDelete(perform: deleteSongs)
+
+                    // Bottom spacer for mini player
+                    Color.clear
+                        .frame(height: 80)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
                 }
+                .listStyle(.plain)
             }
-            .navigationTitle("My Music Library")
-            .onAppear {
-                loadSongs()
-            }
-            // Listen for the end‑of‑song notification and play the next one
-            .onReceive(NotificationCenter.default.publisher(for: .audioFinished)) { _ in
-                playNextSong()
-            }
+        }
+        .searchable(text: $searchText, prompt: "Search songs")
+        .navigationTitle("Library")
+        .onAppear { refreshData() }
+        .onReceive(NotificationCenter.default.publisher(for: .init("SongsFolderChanged"))) { _ in
+            dataManager.syncFromFileSystem()
+            refreshData()
         }
     }
 
-    /// Loads songs from the Documents/Songs folder (no autoplay here)
-    func loadSongs() {
-        let fileManager = FileManager.default
+    private func refreshData() {
+        allSongs = dataManager.fetchAllSongs()
+    }
 
-        // 1. Documents directory
-        guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            print("Documents directory not found")
-            return
+    private func deleteSongs(at offsets: IndexSet) {
+        let songsToDelete = offsets.map { filteredSongs[$0] }
+        for song in songsToDelete {
+            dataManager.deleteSong(song)
         }
+        refreshData()
+    }
 
-        // 2. Songs folder
-        let songsFolderURL = documentsURL.appendingPathComponent("Songs")
-        if !fileManager.fileExists(atPath: songsFolderURL.path) {
-            do {
-                try fileManager.createDirectory(
-                    at: songsFolderURL,
-                    withIntermediateDirectories: true,
-                    attributes: nil
+    // MARK: - Empty State
+    private var emptyState: some View {
+        VStack(spacing: 16) {
+            Spacer()
+
+            Image(systemName: "music.note.house")
+                .font(.system(size: 60))
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [.green, .blue],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
                 )
-                print("Created Songs folder at \(songsFolderURL.path)")
-            } catch {
-                print("Could not create Songs folder: \(error)")
-                return
-            }
+
+            Text("Your library is empty")
+                .font(.title3.bold())
+
+            Text("Download songs from YouTube\nto start building your collection")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            Spacer()
         }
-
-        // 3. Enumerate subfolders
-        do {
-            let subfolders = try fileManager.contentsOfDirectory(
-                at: songsFolderURL,
-                includingPropertiesForKeys: [.isDirectoryKey],
-                options: [.skipsHiddenFiles]
-            )
-            var loadedSongs: [Song] = []
-            for folder in subfolders {
-                var isDir: ObjCBool = false
-                if fileManager.fileExists(atPath: folder.path, isDirectory: &isDir), isDir.boolValue {
-                    if let song = try processSongFolder(folder) {
-                        loadedSongs.append(song)
-                    }
-                }
-            }
-
-            // Update state on main thread
-            DispatchQueue.main.async {
-                self.songs = loadedSongs
-            }
-        } catch {
-            print("Error enumerating songs folder: \(error)")
-        }
-    }
-
-    /// Finds audio & cover inside a song folder
-    func processSongFolder(_ folderURL: URL) throws -> Song? {
-        let fileManager = FileManager.default
-        let contents = try fileManager.contentsOfDirectory(
-            at: folderURL,
-            includingPropertiesForKeys: nil
-        )
-
-        let audioExtensions = ["mp3", "wav", "m4a"]
-        let imageExtensions = ["jpg", "jpeg", "png"]
-
-        var audioURL: URL?
-        var coverURL: URL?
-
-        for file in contents {
-            let ext = file.pathExtension.lowercased()
-            if audioExtensions.contains(ext) {
-                audioURL = file
-            } else if imageExtensions.contains(ext) {
-                coverURL = file
-            }
-        }
-
-        if let audio = audioURL, let cover = coverURL {
-            let title = folderURL.lastPathComponent
-            return Song(title: title, audioFileURL: audio, coverImageURL: cover)
-        } else {
-            print("Folder \(folderURL.lastPathComponent) missing audio or cover")
-            return nil
-        }
-    }
-
-    /// Plays the next song in the list, if any
-    func playNextSong() {
-        guard let current = playerManager.currentSong,
-              let index = songs.firstIndex(where: { $0.id == current.id }),
-              index + 1 < songs.count
-        else { return }
-        let next = songs[index + 1]
-        playerManager.play(song: next)
+        .padding()
     }
 }
-
