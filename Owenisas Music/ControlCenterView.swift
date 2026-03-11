@@ -84,20 +84,50 @@ struct MiniPlayerView: View {
 
     @ViewBuilder
     private func miniPlayerBackground(song: Song) -> some View {
-        if let path = song.coverImageURL?.path, let uiImage = ImageCache.shared.image(for: path) {
-            Image(uiImage: uiImage)
-                .resizable()
-                .scaledToFill()
-                .blur(radius: 40)
-                .overlay(Color.black.opacity(0.65))
-                .drawingGroup()
-        } else {
-            Color(white: 0.1)
-        }
+        MiniPlayerBackgroundView(path: song.coverImageURL?.path)
     }
 
     private var progressFraction: Double {
         guard player.duration > 0 else { return 0 }
         return localCurrentTime / player.duration
+    }
+}
+
+struct MiniPlayerBackgroundView: View {
+    let path: String?
+    @State private var uiImage: UIImage?
+    
+    var body: some View {
+        Group {
+            if let uiImage = uiImage {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFill()
+                    .blur(radius: 40)
+                    .overlay(Color.black.opacity(0.65))
+                    .drawingGroup()
+            } else {
+                Color(white: 0.1)
+            }
+        }
+        .onAppear(perform: load)
+        .onChange(of: path) { load() }
+    }
+    
+    private func load() {
+        guard let path = path else {
+            uiImage = nil
+            return
+        }
+        if let cached = ImageCache.shared.cachedImage(for: path) {
+            uiImage = cached
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let img = ImageCache.shared.image(for: path)
+            DispatchQueue.main.async {
+                self.uiImage = img
+            }
+        }
     }
 }

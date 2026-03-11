@@ -74,21 +74,7 @@ struct CreatePlaylistView: View {
 
                     HStack(spacing: 12) {
                         // Cover
-                        if let path = songData.coverImageURL?.path, let uiImage = UIImage(contentsOfFile: path) {
-                            Image(uiImage: uiImage)
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: 44, height: 44)
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                        } else {
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color.gray.opacity(0.3))
-                                .frame(width: 44, height: 44)
-                                .overlay(
-                                    Image(systemName: "music.note")
-                                        .foregroundStyle(.secondary)
-                                )
-                        }
+                        CachedCoverImage(songData.coverImageURL, size: 44, cornerRadius: 4)
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text(songData.title)

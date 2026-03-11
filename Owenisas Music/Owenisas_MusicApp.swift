@@ -50,8 +50,11 @@ struct Owenisas_MusicApp: App {
             .tint(.green)
             .overlay(alignment: .bottom) {
                 // Position mini player just above the tab bar
-                MiniPlayerView()
-                    .padding(.bottom, 50) // standard tab bar height
+                if player.showMiniPlayer {
+                    MiniPlayerView()
+                        .padding(.bottom, 50) // standard tab bar height
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             }
             .fullScreenCover(isPresented: $player.showFullPlayer) {
                 NowPlayingView()

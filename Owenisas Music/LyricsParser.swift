@@ -13,7 +13,7 @@ class LyricsParser {
             return []
         }
         
-        var lines = content.components(separatedBy: .newlines)
+        let lines = content.components(separatedBy: .newlines)
         var lyrics = [LyricLine]()
         
         // typical VTT structure:

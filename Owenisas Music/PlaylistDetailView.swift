@@ -90,26 +90,19 @@ struct PlaylistDetailView: View {
     }
 
     private var playlistCover: some View {
-        let covers = playlist.songs.prefix(10).compactMap { song -> UIImage? in
-            guard let path = song.coverImageURL?.path else { return nil }
-            return UIImage(contentsOfFile: path)
-        }
+        let urls = Array(playlist.songs.compactMap { $0.coverImageURL }.prefix(4))
 
         return Group {
-            if covers.count >= 4 {
+            if urls.count >= 4 {
                 // 2x2 grid
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 2), GridItem(.flexible(), spacing: 2)], spacing: 2) {
                     ForEach(0..<4, id: \.self) { i in
-                        Image(uiImage: covers[i])
-                            .resizable()
-                            .scaledToFill()
+                        CachedCoverImage(urls[i], size: 110, cornerRadius: 0)
                             .clipped()
                     }
                 }
-            } else if let first = covers.first {
-                Image(uiImage: first)
-                    .resizable()
-                    .scaledToFill()
+            } else if let first = urls.first {
+                CachedCoverImage(first, size: 220, cornerRadius: 0)
             } else {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(
@@ -236,18 +229,7 @@ struct AddSongsToPlaylistView: View {
 
                 HStack {
                     // Cover
-                    if let path = songData.coverImageURL?.path, let uiImage = UIImage(contentsOfFile: path) {
-                        Image(uiImage: uiImage)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: 44, height: 44)
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
-                    } else {
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.gray.opacity(0.3))
-                            .frame(width: 44, height: 44)
-                            .overlay(Image(systemName: "music.note").font(.caption))
-                    }
+                    CachedCoverImage(songData.coverImageURL, size: 44, cornerRadius: 4)
 
                     VStack(alignment: .leading) {
                         Text(songData.title)

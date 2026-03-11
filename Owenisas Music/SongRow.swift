@@ -34,10 +34,18 @@ struct SongRow: View {
             }
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(song.title)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(isCurrentlyPlaying ? .green : .primary)
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(song.title)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(isCurrentlyPlaying ? .green : .primary)
+                        .lineLimit(1)
+                    
+                    if song.isFavorited {
+                        Image(systemName: "heart.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.pink)
+                    }
+                }
 
                 Text(song.artist)
                     .font(.system(size: 12))
@@ -53,6 +61,12 @@ struct SongRow: View {
             }
 
             Menu {
+                Button {
+                    playerManager.toggleFavorite(for: song.id)
+                } label: {
+                    Label(song.isFavorited ? "Unlike" : "Like", systemImage: song.isFavorited ? "heart.slash" : "heart")
+                }
+
                 Button {
                     playerManager.playNext(song)
                 } label: {
@@ -99,6 +113,7 @@ struct SongRow: View {
 // MARK: - Animated "Now Playing" Bars
 struct NowPlayingBars: View {
     @State private var heights: [CGFloat] = [0.4, 0.6, 0.3]
+    let timer = Timer.publish(every: 0.4, on: .main, in: .common).autoconnect()
 
     var body: some View {
         HStack(spacing: 2) {
@@ -109,11 +124,9 @@ struct NowPlayingBars: View {
                     .scaleEffect(y: heights[i], anchor: .bottom)
             }
         }
-        .onAppear {
-            Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in
-                withAnimation(.easeInOut(duration: 0.35)) {
-                    heights = (0..<3).map { _ in CGFloat.random(in: 0.25...1.0) }
-                }
+        .onReceive(timer) { _ in
+            withAnimation(.easeInOut(duration: 0.35)) {
+                heights = (0..<3).map { _ in CGFloat.random(in: 0.25...1.0) }
             }
         }
     }

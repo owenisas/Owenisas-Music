@@ -206,6 +206,9 @@ struct DownloadView: View {
         targetPlaylistName = nil
         targetPlaylistCover = nil
         downloadedTrackTitles = []
+        
+        // Refresh library state before checking duplicates
+        dataManager.syncFromFileSystem()
 
         // Request notification auth
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
@@ -223,8 +226,10 @@ struct DownloadView: View {
         } else if let videoId = extractVideoId(from: link) {
             statusMessage = "🔍 Fetching video info…"
             totalCount = 1
+            print("[DEBUG] Starting single video download: \(videoId)")
             fetchAndDownloadSingle(videoId: videoId)
         } else {
+            print("[DEBUG] Invalid URL pasted: \(link)")
             showError("Invalid URL", "Please paste a valid YouTube link.")
             isDownloading = false
         }
@@ -233,7 +238,15 @@ struct DownloadView: View {
     // MARK: - Single Video Download
 
     func fetchAndDownloadSingle(videoId: String, retries: Int = 2) {
-        let infoURL = URL(string: "\(baseURL)/info?id=\(videoId)")!
+        var components = URLComponents(string: "\(baseURL)/info")!
+        components.queryItems = [URLQueryItem(name: "id", value: videoId)]
+        
+        guard let infoURL = components.url else {
+            showError("Internal Error", "Could not construct URL")
+            isDownloading = false
+            return
+        }
+        
         Self.urlSession.dataTask(with: infoURL) { data, _, error in
             if let error = error {
                 if retries > 0 {
@@ -248,12 +261,13 @@ struct DownloadView: View {
             guard let data = data,
                   let meta = try? JSONDecoder().decode(VideoInfo.self, from: data)
             else {
-                showError("Parse Error", "Failed to parse video metadata.")
+                showError("Video Unavailable", "The video metadata could not be retrieved. It might be private or restricted.")
+                isDownloading = false
                 return
             }
 
-            let safeTitle = meta.title.replacingOccurrences(of: "/", with: "-")
-            let safeArtist = (meta.artist ?? "Unknown Artist").replacingOccurrences(of: "/", with: "-")
+            let safeTitle = meta.title.replacingOccurrences(of: "/", with: "-").precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
+            let safeArtist = (meta.artist ?? "Unknown Artist").replacingOccurrences(of: "/", with: "-").precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
             let safeIdentifier = "\(safeArtist) - \(safeTitle)"
             
             DispatchQueue.main.async {
@@ -262,7 +276,13 @@ struct DownloadView: View {
                 self.sendProgressNotification(message: "Downloading: \(safeTitle)")
             }
 
-            let existingSongs = self.dataManager.fetchAllSongs()
+            var existingSongs: [SongData] = []
+            Task { @MainActor in
+                existingSongs = self.dataManager.fetchAllSongs()
+            }
+            // Wait briefly to allow the main-actor task to run before using existingSongs
+            Thread.sleep(forTimeInterval: 0.0)
+
             if existingSongs.contains(where: { $0.title == meta.title && $0.artist == (meta.artist ?? "Unknown Artist") }) {
                 DispatchQueue.main.async {
                     self.finishSuccess("✅ \"\(safeTitle)\" already exists in library!")
@@ -282,10 +302,27 @@ struct DownloadView: View {
             let continueWithAudio = { (localCover: URL?) in
                 self.download(from: audioURL) { localAudio in
                     DispatchQueue.main.async { self.downloadProgress = 0.8 }
-                    guard let localAudio = localAudio else { return }
+                    guard let localAudio = localAudio else { 
+                        self.showError("Audio Error", "The audio file could not be downloaded. YouTube might be blocking the request.")
+                        self.isDownloading = false
+                        return 
+                    }
 
                     // Download YouTube subtitle tracks
-                    let ytSubs = meta.subtitleUrls?.filter({ $0.key != "lyrics" }) ?? [:]
+                    // Limit to top 3 relevant languages to avoid directory clutter
+                    var ytSubs = meta.subtitleUrls?.filter({ $0.key != "lyrics" }) ?? [:]
+                    if ytSubs.count > 3 {
+                        let preferred = [meta.language ?? "ja", "en", "zh-Hant"]
+                        var limited: [String: String] = [:]
+                        for lang in preferred {
+                            if let url = ytSubs[lang] { limited[lang] = url }
+                        }
+                        // If still empty, just take the first one
+                        if limited.isEmpty, let first = ytSubs.first {
+                            limited[first.key] = first.value
+                        }
+                        ytSubs = limited
+                    }
 
                     let saveWithLyrics = { (ytDownloaded: [(lang: String, url: URL)]) in
                         // Also try LRCLIB for high-quality synced lyrics
@@ -352,9 +389,17 @@ struct DownloadView: View {
     }
 
     func fetchPlaylistInfo(link: String, retries: Int = 2) {
-        let encodedLink = link.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? link
-        let infoURL = URL(string: "\(baseURL)/playlist-info?url=\(encodedLink)")!
-        Self.urlSession.dataTask(with: infoURL) { data, _, error in
+        print("[DEBUG] Fetching playlist metadata for: \(link)")
+        var components = URLComponents(string: "\(baseURL)/playlist-info")!
+        components.queryItems = [URLQueryItem(name: "url", value: link)]
+        
+        guard let infoURL = components.url else {
+            showError("Internal Error", "Could not construct URL")
+            isDownloading = false
+            return
+        }
+        
+        Self.urlSession.dataTask(with: infoURL) { data, response, error in
             if let error = error {
                 if retries > 0 {
                     DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
@@ -402,6 +447,16 @@ struct DownloadView: View {
         }.resume()
     }
 
+    private func songExistsLocally(safeIdentifier rawId: String) -> Bool {
+        let safeIdentifier = rawId.precomposedStringWithCanonicalMapping
+        let fm = FileManager.default
+        guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return false }
+        let songDir = docs.appendingPathComponent("Songs/\(safeIdentifier)")
+        let exists = fm.fileExists(atPath: songDir.path)
+        if exists { print("[DEBUG] Song folder already found on disk: \(safeIdentifier)") }
+        return exists
+    }
+
     func downloadPlaylistTracks(_ videos: [VideoInfo], index: Int) {
         guard index < videos.count else {
             DispatchQueue.main.async {
@@ -412,8 +467,8 @@ struct DownloadView: View {
         }
 
         let meta = videos[index]
-        let safeTitle = meta.title.replacingOccurrences(of: "/", with: "-")
-        let safeArtist = (meta.artist ?? "Unknown Artist").replacingOccurrences(of: "/", with: "-")
+        let safeArtist = (meta.artist ?? "Unknown Artist").replacingOccurrences(of: "/", with: "-").precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeTitle = meta.title.replacingOccurrences(of: "/", with: "-").precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
         let safeIdentifier = "\(safeArtist) - \(safeTitle)"
 
         DispatchQueue.main.async {
@@ -423,22 +478,35 @@ struct DownloadView: View {
         }
 
         // Check if the song has already been downloaded (skip duplicate downloads)
-        let existingSongs = dataManager.fetchAllSongs()
-        if existingSongs.contains(where: { $0.title == meta.title && $0.artist == (meta.artist ?? "Unknown Artist") }) {
-            DispatchQueue.main.async {
+        Task { @MainActor in
+            let existingSongs = dataManager.fetchAllSongs()
+            let isDuplicate = existingSongs.contains(where: { 
+                $0.id == safeIdentifier || 
+                ($0.title == meta.title && $0.artist == (meta.artist ?? "Unknown Artist"))
+            }) || songExistsLocally(safeIdentifier: safeIdentifier)
+
+            if isDuplicate {
+                print("[DEBUG] Skipping duplicate: \(safeIdentifier)")
+                statusMessage = "⏭ Skipping duplicate: \(safeTitle)"
                 self.downloadedCount += 1
                 self.downloadedTrackTitles.append(safeIdentifier)
+                // Skip and move to next track
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) {
+                    self.downloadPlaylistTracks(videos, index: index + 1)
+                }
+                return
             }
-            // Skip and move to next track
-            self.downloadPlaylistTracks(videos, index: index + 1)
-            return
+            
+            // If not duplicate, proceed with audio download (back to background)
+            DispatchQueue.global().async {
+                self.proceedWithPlaylistDownload(videos, index: index, meta: meta, safeIdentifier: safeIdentifier, safeTitle: safeTitle)
+            }
         }
+    }
 
+    private func proceedWithPlaylistDownload(_ videos: [VideoInfo], index: Int, meta: VideoInfo, safeIdentifier: String, safeTitle: String) {
         guard let audioURL = URL(string: meta.audioUrl) else {
-            // Skip this track and continue
-            DispatchQueue.main.async {
-                self.downloadedTrackTitles.append(safeIdentifier)
-            }
+            DispatchQueue.main.async { self.downloadedTrackTitles.append(safeIdentifier) }
             downloadPlaylistTracks(videos, index: index + 1)
             return
         }
@@ -456,7 +524,7 @@ struct DownloadView: View {
         let continueWithAudio = { (localCover: URL?) in
             self.download(from: audioURL) { localAudio in
                 guard let localAudio = localAudio else {
-                    // Audio failed, skip this track gracefully!
+                    print("[DEBUG] Playlist Download: Audio failed for \(safeTitle), skipping track.")
                     self.downloadPlaylistTracks(videos, index: index + 1)
                     return
                 }
@@ -524,6 +592,7 @@ struct DownloadView: View {
     }
 
     struct VideoInfo: Decodable {
+        let id: String
         let title: String
         let artist: String?
         let album: String?
@@ -726,26 +795,28 @@ struct DownloadView: View {
         let songsFolder = docs.appendingPathComponent("Songs", isDirectory: true)
         try fm.createDirectory(at: songsFolder, withIntermediateDirectories: true)
 
-        let songDir = songsFolder.appendingPathComponent(title, isDirectory: true)
+        let normalizedTitle = title.precomposedStringWithCanonicalMapping
+        let songDir = songsFolder.appendingPathComponent(normalizedTitle, isDirectory: true)
         try fm.createDirectory(at: songDir, withIntermediateDirectories: true)
 
-        let destCover = songDir.appendingPathComponent("\(title).jpg")
-        let destAudio = songDir.appendingPathComponent("\(title).mp3")
+        let destCover = songDir.appendingPathComponent("\(normalizedTitle).jpg")
+        let destAudio = songDir.appendingPathComponent("\(normalizedTitle).mp3")
 
         if fm.fileExists(atPath: destCover.path) { try fm.removeItem(at: destCover) }
         if fm.fileExists(atPath: destAudio.path) { try fm.removeItem(at: destAudio) }
 
         if let localCover = localCover, fm.fileExists(atPath: localCover.path) {
-            // Convert to actual JPEG — downloaded files may be WebP/PNG despite .jpg extension
-            if let imageData = try? Data(contentsOf: localCover),
-               let uiImage = UIImage(data: imageData),
-               let jpegData = uiImage.jpegData(compressionQuality: 0.9) {
-                try jpegData.write(to: destCover)
-                try? fm.removeItem(at: localCover) // clean up temp file
-            } else {
-                // Fallback: just move the file as-is
-                try fm.moveItem(at: localCover, to: destCover)
+            if let imageData = try? Data(contentsOf: localCover), !imageData.isEmpty {
+                if let uiImage = UIImage(data: imageData),
+                   let jpegData = uiImage.jpegData(compressionQuality: 0.9) {
+                    try jpegData.write(to: destCover)
+                    print("[DEBUG] Successfully saved normalized cover: \(destCover.lastPathComponent)")
+                } else {
+                    print("[DEBUG] WARNING: Could not decode image data for \(title), saving as-is")
+                    try fm.moveItem(at: localCover, to: destCover)
+                }
             }
+            try? fm.removeItem(at: localCover)
         }
         try fm.moveItem(at: localAudio, to: destAudio)
 
@@ -842,10 +913,28 @@ struct DownloadView: View {
                 let cacheDir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first!
                 let persistentTempURL = cacheDir.appendingPathComponent(UUID().uuidString).appendingPathExtension(url.pathExtension)
                 do {
+                    // Pre-validation: Don't move if file is suspiciously small
+                    let attr = try fm.attributesOfItem(atPath: tmp.path)
+                    let size = attr[.size] as? Int64 ?? 0
+                    
+                    let isImage = ["jpg", "jpeg", "png", "webp"].contains(url.pathExtension.lowercased())
+                    let isAudio = ["mp3", "wav", "m4a", "aac", "flac"].contains(url.pathExtension.lowercased())
+                    
+                    if isAudio && size < 500_000 {
+                        print("[DEBUG] Downloaded audio is too small (\(size) bytes), likely corrupted.")
+                        completion(nil)
+                        return
+                    }
+                    if isImage && size < 5_000 {
+                        print("[DEBUG] Downloaded image is too small (\(size) bytes), likely corrupted.")
+                        completion(nil)
+                        return
+                    }
+
                     try fm.moveItem(at: tmp, to: persistentTempURL)
                     completion(persistentTempURL)
                 } catch {
-                    print("Failed to save persistent temp file: \(error)")
+                    print("Failed to validate or save persistent temp file: \(error)")
                     completion(nil)
                 }
             } else {
@@ -885,3 +974,4 @@ struct DownloadView: View {
         UNUserNotificationCenter.current().add(request)
     }
 }
+

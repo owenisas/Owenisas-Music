@@ -123,7 +123,18 @@ struct NowPlayingView: View {
     // MARK: - Cover image (cached, loaded once per song)
     private func loadCoverImage() {
         if let path = player.currentSong?.coverImageURL?.path {
-            cachedCoverImage = ImageCache.shared.image(for: path)
+            if let cached = ImageCache.shared.cachedImage(for: path) {
+                cachedCoverImage = cached
+            } else {
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let image = ImageCache.shared.image(for: path)
+                    DispatchQueue.main.async {
+                        if self.player.currentSong?.coverImageURL?.path == path {
+                            self.cachedCoverImage = image
+                        }
+                    }
+                }
+            }
         } else {
             cachedCoverImage = nil
         }

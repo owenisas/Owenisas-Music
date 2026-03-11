@@ -34,6 +34,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
     @Published var isShuffled = false
     @Published var repeatMode: RepeatMode = .off
     @Published var showFullPlayer = false
+    @Published var showMiniPlayer = true
     @Published var crossfadeEnabled = true
     @Published var crossfadeDuration: TimeInterval = 3.0
 
@@ -153,15 +154,27 @@ class MusicPlayerManager: NSObject, ObservableObject {
         let currentId = currentSong?.id
         queue.remove(atOffsets: offsets)
         
-        // If current song was removed, stop or play next
-        if let currentId = currentId, !queue.contains(where: { $0.id == currentId }) {
+        if let currentId = currentId, let idx = queue.firstIndex(where: { $0.id == currentId }) {
+            // Current song is still in the queue, just update its index!
+            currentIndex = idx
+        } else {
+            // Current song was removed.
             if queue.isEmpty {
                 stop()
             } else {
-                next()
+                // If currentIndex >= queue.count, we removed the last item.
+                if currentIndex >= queue.count {
+                    if repeatMode == .all {
+                        currentIndex = 0
+                        loadAndPlay(queue[0], crossfade: true)
+                    } else {
+                        stop()
+                    }
+                } else {
+                    // Start playing the item that shifted into currentIndex
+                    loadAndPlay(queue[currentIndex], crossfade: true)
+                }
             }
-        } else if let current = currentSong, let idx = queue.firstIndex(where: { $0.id == current.id }) {
-            currentIndex = idx
         }
     }
 
@@ -193,9 +206,20 @@ class MusicPlayerManager: NSObject, ObservableObject {
 
         stopTimer()
         player?.stop()
+        print("[DEBUG] MusicPlayer: Loading and playing song: \(song.title) (ID: \(song.id))")
         currentSong = song
 
         do {
+            // Check if file exists and is valid
+            let fm = FileManager.default
+            if !fm.fileExists(atPath: song.audioFileURL.path) {
+                throw NSError(domain: "MusicPlayer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Audio file missing on disk"])
+            }
+            let attr = try fm.attributesOfItem(atPath: song.audioFileURL.path)
+            if (attr[.size] as? Int64 ?? 0) < 500_000 {
+                throw NSError(domain: "MusicPlayer", code: 500, userInfo: [NSLocalizedDescriptionKey: "Audio file is corrupted or too small"])
+            }
+
             player = try AVAudioPlayer(contentsOf: song.audioFileURL)
             player?.delegate = self
             player?.prepareToPlay()
@@ -208,10 +232,10 @@ class MusicPlayerManager: NSObject, ObservableObject {
             updateListeningHistory(song)
         } catch {
             print("Error playing \(song.title): \(error)")
-            isPlaying = false
-            currentSong = nil
-            stopTimer()
-            updateNowPlayingInfo(clear: true)
+            // If play fails, try to skip to next automatically
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.next()
+            }
         }
     }
 
@@ -226,6 +250,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
             secondaryPlayer?.delegate = self
             secondaryPlayer?.volume = 0
             secondaryPlayer?.prepareToPlay()
+            print("[DEBUG] MusicPlayer: Starting crossfade to: \(song.title)")
             secondaryPlayer?.play()
 
             // Crossfade
@@ -259,10 +284,28 @@ class MusicPlayerManager: NSObject, ObservableObject {
     }
 
     func toggleFavorite() {
-        guard var song = currentSong else { return }
-        song.isFavorited.toggle()
-        currentSong = song
-        NotificationCenter.default.post(name: .init("SongFavoriteToggled"), object: song.id)
+        if let current = currentSong {
+            toggleFavorite(for: current.id)
+        }
+    }
+
+    func toggleFavorite(for songId: String) {
+        // Broadcast to DataManager to persist the change in SwiftData
+        NotificationCenter.default.post(name: .init("SongFavoriteToggled"), object: songId)
+        
+        // Ensure the currently playing song is perfectly synced on the Now Playing screen
+        if var current = currentSong, current.id == songId {
+            current.isFavorited.toggle()
+            currentSong = current
+        }
+        
+        // Sync the internal player queues correctly so when `next` plays, it still displays the Like correctly
+        if let idx = queue.firstIndex(where: { $0.id == songId }) {
+            queue[idx].isFavorited.toggle()
+        }
+        if let idx = originalQueue.firstIndex(where: { $0.id == songId }) {
+            originalQueue[idx].isFavorited.toggle()
+        }
     }
 
     // MARK: - Pause / Stop
@@ -340,16 +383,26 @@ class MusicPlayerManager: NSObject, ObservableObject {
     // MARK: - Shuffle
     func toggleShuffle() {
         isShuffled.toggle()
-        guard let current = currentSong else { return }
-        if isShuffled {
-            var rest = queue.filter { $0.id != current.id }
-            rest.shuffle()
-            queue = [current] + rest
-            currentIndex = 0
+        if let current = currentSong {
+            if isShuffled {
+                var rest = queue.filter { $0.id != current.id }
+                rest.shuffle()
+                queue = [current] + rest
+                currentIndex = 0
+            } else {
+                queue = originalQueue
+                if let idx = queue.firstIndex(where: { $0.id == current.id }) {
+                    currentIndex = idx
+                }
+            }
         } else {
-            queue = originalQueue
-            if let idx = queue.firstIndex(where: { $0.id == current.id }) {
-                currentIndex = idx
+            // If nothing is playing, just shuffle the whole queue
+            if isShuffled {
+                queue.shuffle()
+                currentIndex = 0
+            } else {
+                queue = originalQueue
+                currentIndex = 0
             }
         }
     }
@@ -370,10 +423,46 @@ class MusicPlayerManager: NSObject, ObservableObject {
                 self.currentTime = p.currentTime
                 
                 // Auto-next logic: If near end and crossfade enabled
-                if self.crossfadeEnabled && (p.duration - p.currentTime) < self.crossfadeDuration && !p.isLooping {
-                    // Start preparing next...
+                if self.crossfadeEnabled && (p.duration - p.currentTime) <= self.crossfadeDuration && !p.isLooping {
+                    if self.secondaryPlayer == nil {
+                        var shouldCrossfade = false
+                        if self.repeatMode == .one || self.repeatMode == .all {
+                            shouldCrossfade = true
+                        } else if self.currentIndex + 1 < self.queue.count {
+                            shouldCrossfade = true
+                        }
+                        
+                        if shouldCrossfade {
+                            self.autoAdvance()
+                        }
+                    }
                 }
             }
+    }
+
+    private func autoAdvance() {
+        print("[DEBUG] MusicPlayer: Auto-advancing to next song (Repeat Mode: \(repeatMode))")
+        switch repeatMode {
+        case .one:
+            if let song = currentSong {
+                loadAndPlay(song, crossfade: true)
+            }
+        case .all:
+            let nextIndex = currentIndex + 1
+            if nextIndex < queue.count {
+                currentIndex = nextIndex
+                loadAndPlay(queue[nextIndex], crossfade: true)
+            } else {
+                currentIndex = 0
+                loadAndPlay(queue[0], crossfade: true)
+            }
+        case .off:
+            let nextIndex = currentIndex + 1
+            if nextIndex < queue.count {
+                currentIndex = nextIndex
+                loadAndPlay(queue[nextIndex], crossfade: true)
+            }
+        }
     }
 
     private func stopTimer() {
@@ -407,7 +496,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
             MPMediaItemPropertyPlaybackDuration: player.duration,
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0
         ]
-        if let path = song.coverImageURL?.path, let image = UIImage(contentsOfFile: path) {
+        if let path = song.coverImageURL?.path, let image = ImageCache.shared.image(for: path) {
             let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
             info[MPMediaItemPropertyArtwork] = artwork
         }
@@ -454,6 +543,9 @@ extension MusicPlayerManager: AVAudioPlayerDelegate {
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         // If this was the secondary player from a crossfade, ignore
         if player == secondaryPlayer { return }
+        
+        // If we crossfaded, ignore natural ending of old player
+        guard secondaryPlayer == nil else { return }
         
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }

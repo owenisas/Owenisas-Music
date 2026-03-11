@@ -94,31 +94,8 @@ struct ContentView: View {
                         player.play(song: song, in: dataManager.toSongs(allSongs))
                     } label: {
                         VStack(alignment: .leading, spacing: 6) {
-                            Group {
-                                if let path = song.coverImageURL?.path, let uiImage = UIImage(contentsOfFile: path) {
-                                    Image(uiImage: uiImage)
-                                        .resizable()
-                                        .scaledToFill()
-                                        .frame(width: 150, height: 150)
-                                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                } else {
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .fill(
-                                            LinearGradient(
-                                                colors: [.blue.opacity(0.4), .purple.opacity(0.4)],
-                                                startPoint: .topLeading,
-                                                endPoint: .bottomTrailing
-                                            )
-                                        )
-                                        .frame(width: 150, height: 150)
-                                        .overlay(
-                                            Image(systemName: "music.note")
-                                                .font(.system(size: 32))
-                                                .foregroundStyle(.white.opacity(0.5))
-                                        )
-                                }
-                            }
-                            .shadow(color: .black.opacity(0.15), radius: 6, y: 4)
+                            CachedCoverImage(song.coverImageURL, size: 150, cornerRadius: 12)
+                                .shadow(color: .black.opacity(0.15), radius: 6, y: 4)
 
                             Text(songData.title)
                                 .font(.system(size: 13, weight: .semibold))
@@ -134,6 +111,12 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
                     .contextMenu {
+                        Button {
+                            player.toggleFavorite(for: songData.id)
+                        } label: {
+                            Label(songData.isFavorited ? "Unlike" : "Like", systemImage: songData.isFavorited ? "heart.slash" : "heart")
+                        }
+
                         Button {
                             player.playNext(Song.from(songData))
                         } label: {
@@ -203,6 +186,40 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
 
+                // Liked Songs pseudo-playlist
+                NavigationLink {
+                    LikedSongsView()
+                } label: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [.pink.opacity(0.8), .red.opacity(0.8)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 140, height: 140)
+                            .overlay(
+                                Image(systemName: "heart.fill")
+                                    .font(.system(size: 40))
+                                    .foregroundStyle(.white)
+                            )
+                            .shadow(color: .pink.opacity(0.3), radius: 6, y: 4)
+
+                        Text("Liked Songs")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+
+                        Text("Auto-Playlist")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(width: 140)
+                }
+                .buttonStyle(.plain)
+
                 ForEach(playlists, id: \.id) { playlist in
                     NavigationLink {
                         PlaylistDetailView(playlist: playlist)
@@ -231,28 +248,21 @@ struct ContentView: View {
     }
 
     private func playlistCoverSmall(_ playlist: PlaylistData) -> some View {
-        let covers = playlist.songs.prefix(10).compactMap { song -> UIImage? in
-            guard let path = song.coverImageURL?.path else { return nil }
-            return UIImage(contentsOfFile: path)
-        }
+        let urls = Array(playlist.songs.compactMap { $0.coverImageURL }.prefix(4))
 
         return Group {
-            if covers.count >= 4 {
+            if urls.count >= 4 {
                 LazyVGrid(columns: [
                     GridItem(.flexible(), spacing: 2),
                     GridItem(.flexible(), spacing: 2)
                 ], spacing: 2) {
                     ForEach(0..<4, id: \.self) { i in
-                        Image(uiImage: covers[i])
-                            .resizable()
-                            .scaledToFill()
+                        CachedCoverImage(urls[i], size: 70, cornerRadius: 0)
                             .clipped()
                     }
                 }
-            } else if let first = covers.first {
-                Image(uiImage: first)
-                    .resizable()
-                    .scaledToFill()
+            } else if let first = urls.first {
+                CachedCoverImage(first, size: 140, cornerRadius: 0)
             } else {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(

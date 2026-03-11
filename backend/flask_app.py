@@ -26,10 +26,21 @@ def setup_node():
 def update_yt_dlp():
     """Download the latest yt-dlp binary."""
     binary_path = os.path.join(BASE_DIR, 'yt-dlp')
-    # Use proxy to download if needed, or directly download
-    download_cmd = f"export http_proxy=http://proxy.server:3128; export https_proxy=http://proxy.server:3128; curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o {binary_path} && chmod a+rx {binary_path}"
-    subprocess.check_output(['bash', '-c', download_cmd])
-    return binary_path
+    # Try direct download first, then fall back to proxy (for PythonAnywhere free)
+    commands = [
+        f"curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o {binary_path} && chmod a+rx {binary_path}",
+        f"export http_proxy=http://proxy.server:3128; export https_proxy=http://proxy.server:3128; curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o {binary_path} && chmod a+rx {binary_path}"
+    ]
+    
+    last_err = ""
+    for cmd in commands:
+        try:
+            subprocess.check_output(['bash', '-c', cmd], stderr=subprocess.STDOUT)
+            return binary_path
+        except subprocess.CalledProcessError as e:
+            last_err = e.output.decode()
+            continue
+    raise Exception(f"Failed to update yt-dlp: {last_err}")
 
 @app.route("/check")
 def check_version():
@@ -73,7 +84,17 @@ def run_yt_dlp(args):
         binary_path = update_yt_dlp()
 
     cmd = [binary_path, '--cookies', COOKIE_FILE, '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', '--js-runtimes', 'node'] + args
-    return subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode()
+    
+    # Use Popen to capture properly and handle non-zero exit codes if output is still present
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    stdout, _ = process.communicate()
+    output = stdout.decode('utf-8', errors='ignore')
+    
+    # If it failed and we have no output, or it's a hard error
+    if process.returncode != 0 and not output.strip().startswith('{'):
+        raise subprocess.CalledProcessError(process.returncode, cmd, output=stdout)
+        
+    return output
 
 
 @app.route("/download")
@@ -312,7 +333,10 @@ def playlist_info():
     if not playlist_url and not playlist_id:
         return jsonify({"error": "Missing `url` or `id` parameter"}), 400
         
-    if not playlist_url:
+    if playlist_url:
+        import urllib.parse
+        playlist_url = urllib.parse.unquote(playlist_url)
+    elif playlist_id:
         playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
 
     import hashlib
@@ -326,8 +350,10 @@ def playlist_info():
             pass
 
     try:
+        max_entries = 300
         out = run_yt_dlp([
             '--dump-single-json', '--flat-playlist',
+            '--playlist-end', str(max_entries),
             playlist_url
         ])
         result = json.loads(out)
@@ -340,21 +366,18 @@ def playlist_info():
     playlist_title  = result.get("title", "Unknown Playlist")
     playlist_artist = result.get("uploader") or result.get("channel") or "Unknown Artist"
     
+    # Efficiently pick a thumbnail without doing many HEAD requests
     thumbs = result.get("thumbnails", [])
     playlist_cover = ""
-    for t in reversed(thumbs):
-        url = t.get("url")
-        if url:
-            try:
-                req = urllib.request.Request(url, method='HEAD')
-                with urllib.request.urlopen(req, timeout=3) as res:
-                    if res.status == 200:
-                        playlist_cover = url
-                        break
-            except Exception:
-                pass
-
+    if thumbs:
+        # Sort by width/height if available, otherwise just pick the last one (usually highest res)
+        best_thumb = sorted(thumbs, key=lambda x: x.get('width', 0) or 0, reverse=True)[0]
+        playlist_cover = best_thumb.get("url", "")
+    
     entries         = result.get("entries", [])
+    # Limit to first 300 songs to prevent timeouts and memory issues with huge Mixes
+    max_entries = 300
+    entries = entries[:max_entries]
 
     videos = []
     for entry in entries:
