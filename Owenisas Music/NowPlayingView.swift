@@ -126,7 +126,7 @@ struct NowPlayingView: View {
             if let cached = ImageCache.shared.cachedImage(for: path) {
                 cachedCoverImage = cached
             } else {
-                DispatchQueue.global(qos: .userInitiated).async {
+                DispatchQueue.global(qos: .utility).async {
                     let image = ImageCache.shared.image(for: path)
                     DispatchQueue.main.async {
                         if self.player.currentSong?.coverImageURL?.path == path {
@@ -279,8 +279,11 @@ struct NowPlayingView: View {
     private var progressSection: some View {
         VStack(spacing: 6) {
             GeometryReader { geo in
-                let progress = player.duration > 0 ? localCurrentTime / player.duration : 0
-                let fillWidth = geo.size.width * CGFloat(min(progress, 1.0))
+                let progress = player.duration.isFinite && player.duration > 0 && localCurrentTime.isFinite
+                    ? min(max(localCurrentTime / player.duration, 0), 1)
+                    : 0
+                let availableWidth = geo.size.width.isFinite ? max(geo.size.width, 0) : 0
+                let fillWidth = availableWidth * CGFloat(progress)
 
                 ZStack(alignment: .leading) {
                     Capsule()
@@ -305,7 +308,9 @@ struct NowPlayingView: View {
                     DragGesture(minimumDistance: 0)
                         .onChanged { v in
                             isScrubbing = true
-                            let fraction = max(0, min(v.location.x / geo.size.width, 1))
+                            let availableWidth = geo.size.width.isFinite ? max(geo.size.width, 0) : 0
+                            guard availableWidth > 0, player.duration.isFinite else { return }
+                            let fraction = max(0, min(v.location.x / availableWidth, 1))
                             player.seek(to: fraction * player.duration)
                         }
                         .onEnded { _ in
@@ -357,6 +362,8 @@ struct NowPlayingView: View {
                         .offset(x: player.isPlaying ? 0 : 2)
                 }
             }
+            .accessibilityIdentifier("nowPlayingPlayPause")
+            .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
 
             Spacer()
 

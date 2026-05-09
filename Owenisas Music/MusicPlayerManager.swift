@@ -44,7 +44,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
     /// The active queue (may be shuffled)
     @Published var queue: [Song] = []
     @Published var currentIndex: Int = 0
-    private var backgroundTicks = 0
+    private var backgroundTicks: Int = 0
 
     /// Public read-only playlist access
     var playlist: [Song] { queue }
@@ -144,6 +144,8 @@ class MusicPlayerManager: NSObject, ObservableObject {
 
     func moveInQueue(from source: IndexSet, to destination: Int) {
         queue.move(fromOffsets: source, toOffset: destination)
+        originalQueue = queue
+
         // Re-calculate currentIndex
         if let current = currentSong, let idx = queue.firstIndex(where: { $0.id == current.id }) {
             currentIndex = idx
@@ -152,7 +154,12 @@ class MusicPlayerManager: NSObject, ObservableObject {
 
     func removeFromQueue(at offsets: IndexSet) {
         let currentId = currentSong?.id
+        let removedSongs = offsets.compactMap { index in
+            index < queue.count ? queue[index] : nil
+        }
         queue.remove(atOffsets: offsets)
+        let removedIDs = Set(removedSongs.map { $0.id })
+        originalQueue.removeAll { removedIDs.contains($0.id) }
         
         if let currentId = currentId, let idx = queue.firstIndex(where: { $0.id == currentId }) {
             // Current song is still in the queue, just update its index!
@@ -179,11 +186,23 @@ class MusicPlayerManager: NSObject, ObservableObject {
     }
 
     func stopAndRemoveFromQueue(songId: String) {
-        if currentSong?.id == songId {
+        let removedCurrentSong = currentSong?.id == songId
+        if removedCurrentSong {
             stop()
         }
         queue.removeAll { $0.id == songId }
         originalQueue.removeAll { $0.id == songId }
+
+        guard !queue.isEmpty else {
+            currentIndex = 0
+            return
+        }
+
+        if removedCurrentSong {
+            currentIndex = min(currentIndex, queue.count - 1)
+            loadAndPlay(queue[currentIndex], crossfade: false)
+            return
+        }
         
         if let current = currentSong, let idx = queue.firstIndex(where: { $0.id == current.id }) {
             currentIndex = idx
@@ -220,7 +239,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
                 throw NSError(domain: "MusicPlayer", code: 500, userInfo: [NSLocalizedDescriptionKey: "Audio file is corrupted or too small"])
             }
 
-            player = try AVAudioPlayer(contentsOf: song.audioFileURL)
+            player = try Self.makeAudioPlayer(for: song.audioFileURL)
             player?.delegate = self
             player?.prepareToPlay()
             duration = player?.duration ?? 0
@@ -232,11 +251,40 @@ class MusicPlayerManager: NSObject, ObservableObject {
             updateListeningHistory(song)
         } catch {
             print("Error playing \(song.title): \(error)")
+            NSLog("OWENISAS_PLAYER: load failed for %@ at %@: %@", song.title, song.audioFileURL.path, "\(error)")
             // If play fails, try to skip to next automatically
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 self.next()
             }
         }
+    }
+
+    /// Build an AVAudioPlayer that handles our downloads even when the saved
+    /// extension doesn't match the actual container (e.g. m4a content saved as .mp3).
+    /// We sniff the first bytes for an mp4 (`ftyp`) header and pass the right hint.
+    private static func makeAudioPlayer(for url: URL) throws -> AVAudioPlayer {
+        let fileTypeHint: String? = {
+            guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+            defer { try? handle.close() }
+            let head = (try? handle.read(upToCount: 12)) ?? Data()
+            if head.count >= 8 {
+                let ftyp = head.subdata(in: 4..<8)
+                if let s = String(data: ftyp, encoding: .ascii), s == "ftyp" {
+                    return AVFileType.m4a.rawValue
+                }
+            }
+            if head.count >= 4 {
+                let bytes = Array(head)
+                if bytes[0] == 0x4F && bytes[1] == 0x67 && bytes[2] == 0x67 && bytes[3] == 0x53 {
+                    return "org.xiph.ogg-audio"
+                }
+            }
+            return nil
+        }()
+        if let hint = fileTypeHint {
+            return try AVAudioPlayer(contentsOf: url, fileTypeHint: hint)
+        }
+        return try AVAudioPlayer(contentsOf: url)
     }
 
     private func performCrossfade(to song: Song) {
@@ -246,7 +294,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
         }
 
         do {
-            secondaryPlayer = try AVAudioPlayer(contentsOf: song.audioFileURL)
+            secondaryPlayer = try Self.makeAudioPlayer(for: song.audioFileURL)
             secondaryPlayer?.delegate = self
             secondaryPlayer?.volume = 0
             secondaryPlayer?.prepareToPlay()
@@ -261,14 +309,17 @@ class MusicPlayerManager: NSObject, ObservableObject {
             duration = secondaryPlayer?.duration ?? 0
             currentTime = 0
             isPlaying = true
-            updateNowPlayingInfo()
             updateListeningHistory(song)
 
-            // After fade completes, clean up
+            // After fade completes, clean up and update NowPlaying with correct elapsed time
             DispatchQueue.main.asyncAfter(deadline: .now() + crossfadeDuration) { [weak self] in
+                guard let self = self else { return }
                 oldPlayer.stop()
-                self?.player = self?.secondaryPlayer
-                self?.secondaryPlayer = nil
+                self.player = self.secondaryPlayer
+                self.secondaryPlayer = nil
+                // Now that self.player points to the new player, sync the accurate elapsed time
+                self.currentTime = self.player?.currentTime ?? 0
+                self.updateNowPlayingInfo()
             }
         } catch {
             print("Crossfade fail: \(error)")
@@ -331,6 +382,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
         secondaryPlayer = nil
         isPlaying = false
         currentSong = nil
+        currentIndex = 0
         currentTime = 0
         duration = 0
         stopTimer()
@@ -339,7 +391,8 @@ class MusicPlayerManager: NSObject, ObservableObject {
 
     // MARK: - Seek
     func seek(to time: TimeInterval) {
-        player?.currentTime = time
+        let activePlayer = secondaryPlayer ?? player
+        activePlayer?.currentTime = time
         currentTime = time
         updateNowPlayingInfo()
     }
@@ -415,12 +468,19 @@ class MusicPlayerManager: NSObject, ObservableObject {
 
     // MARK: - Timer (progress tracking)
     private func startTimer() {
-        timer = Timer.publish(every: 0.05, on: .main, in: .common)
+        stopTimer()
+        timer = Timer.publish(every: 0.25, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self = self, let p = self.player else { return }
                 
                 self.currentTime = p.currentTime
+                
+                // Periodically sync Control Center elapsed time
+                self.backgroundTicks += 1
+                if self.backgroundTicks % 4 == 0 { // ~every 1 second
+                    self.updateNowPlayingElapsedTime()
+                }
                 
                 // Auto-next logic: If near end and crossfade enabled
                 if self.crossfadeEnabled && (p.duration - p.currentTime) <= self.crossfadeDuration && !p.isLooping {
@@ -470,6 +530,15 @@ class MusicPlayerManager: NSObject, ObservableObject {
         timer = nil
     }
 
+    /// Lightweight update: only syncs elapsed time without rebuilding the full NowPlaying dict
+    private func updateNowPlayingElapsedTime() {
+        guard var info = MPNowPlayingInfoCenter.default().nowPlayingInfo,
+              let p = player else { return }
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = p.currentTime
+        info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
     // MARK: - Format helpers
     static func formatTime(_ time: TimeInterval) -> String {
         guard !time.isNaN && !time.isInfinite else { return "0:00" }
@@ -484,16 +553,17 @@ class MusicPlayerManager: NSObject, ObservableObject {
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
             return
         }
-        guard let song = currentSong, let player = player else {
+        guard let song = currentSong else {
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
             return
         }
+        let activePlayer = secondaryPlayer ?? player
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: song.title,
             MPMediaItemPropertyArtist: song.artist,
             MPMediaItemPropertyAlbumTitle: song.albumTitle,
-            MPNowPlayingInfoPropertyElapsedPlaybackTime: player.currentTime,
-            MPMediaItemPropertyPlaybackDuration: player.duration,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: activePlayer?.currentTime ?? currentTime,
+            MPMediaItemPropertyPlaybackDuration: activePlayer?.duration ?? duration,
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0
         ]
         if let path = song.coverImageURL?.path, let image = ImageCache.shared.image(for: path) {
@@ -508,26 +578,27 @@ class MusicPlayerManager: NSObject, ObservableObject {
         let cc = MPRemoteCommandCenter.shared()
 
         cc.playCommand.addTarget { [weak self] _ in
-            self?.resume()
+            DispatchQueue.main.async { self?.resume() }
             return .success
         }
         cc.pauseCommand.addTarget { [weak self] _ in
-            self?.pause()
+            DispatchQueue.main.async { self?.pause() }
             return .success
         }
         cc.nextTrackCommand.addTarget { [weak self] _ in
-            self?.next()
+            DispatchQueue.main.async { self?.next() }
             return .success
         }
         cc.previousTrackCommand.addTarget { [weak self] _ in
-            self?.previous()
+            DispatchQueue.main.async { self?.previous() }
             return .success
         }
+        cc.changePlaybackPositionCommand.isEnabled = true
         cc.changePlaybackPositionCommand.addTarget { [weak self] event in
             guard let self = self,
                   let e = event as? MPChangePlaybackPositionCommandEvent
             else { return .commandFailed }
-            self.seek(to: e.positionTime)
+            DispatchQueue.main.async { self.seek(to: e.positionTime) }
             return .success
         }
     }
@@ -540,9 +611,14 @@ extension AVAudioPlayer {
 
 // MARK: - AVAudioPlayerDelegate
 extension MusicPlayerManager: AVAudioPlayerDelegate {
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+    func audioPlayerDidFinishPlaying(_ finishedPlayer: AVAudioPlayer, successfully flag: Bool) {
         // If this was the secondary player from a crossfade, ignore
-        if player == secondaryPlayer { return }
+        if finishedPlayer == secondaryPlayer { return }
+        
+        // If crossfade already advanced to a new song via autoAdvance,
+        // ignore the old player's natural finish to prevent double-skip.
+        // Check: if the current player is NOT the one that finished, someone else took over.
+        if finishedPlayer !== player { return }
         
         // If we crossfaded, ignore natural ending of old player
         guard secondaryPlayer == nil else { return }
@@ -562,9 +638,7 @@ extension MusicPlayerManager: AVAudioPlayerDelegate {
                     self.currentIndex = nextIndex
                     self.loadAndPlay(self.queue[nextIndex], crossfade: true)
                 } else {
-                    self.isPlaying = false
-                    self.currentSong = nil
-                    self.updateNowPlayingInfo(clear: true)
+                    self.stop()
                 }
             }
         }

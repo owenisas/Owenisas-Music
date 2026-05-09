@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: owenisas-music-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: >
+      pip install -r requirements.txt &&
+      curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o yt-dlp &&
+      chmod a+rx yt-dlp
+    startCommand: gunicorn -w 1 -b 0.0.0.0:$PORT --timeout 600 flask_app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"

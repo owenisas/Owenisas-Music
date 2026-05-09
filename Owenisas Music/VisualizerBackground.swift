@@ -114,7 +114,7 @@ struct CachedCoverImage: View {
             return
         }
         
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .utility).async {
             guard let img = ImageCache.shared.image(for: path) else { return }
             DispatchQueue.main.async {
                 self.uiImage = img
@@ -285,7 +285,7 @@ struct AnimatedNowPlayingBackground: View {
         }
 
         // Run extraction off main thread
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .utility).async {
             let extracted = image.dominantColors()
             if let path = self.imagePath {
                 ImageCache.shared.setColors(extracted, for: path)

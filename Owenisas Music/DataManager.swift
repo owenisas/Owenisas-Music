@@ -9,26 +9,37 @@ class DataManager: ObservableObject {
     static let shared = DataManager()
 
     var modelContext: ModelContext?
+    private var observerTokens: [NSObjectProtocol] = []
 
     // MARK: - Setup
     func configure(with context: ModelContext) {
         self.modelContext = context
-        setupObservers()
+        if observerTokens.isEmpty {
+            setupObservers()
+        }
     }
 
     private func setupObservers() {
-        NotificationCenter.default.addObserver(forName: .init("SongPlayed"), object: nil, queue: .main) { [weak self] note in
+        let songPlayedObserver = NotificationCenter.default.addObserver(forName: .init("SongPlayed"), object: nil, queue: .main) { [weak self] note in
             guard let songId = note.object as? String else { return }
             Task { @MainActor in
                 self?.markSongAsPlayed(songId: songId)
             }
         }
+        observerTokens.append(songPlayedObserver)
         
-        NotificationCenter.default.addObserver(forName: .init("SongFavoriteToggled"), object: nil, queue: .main) { [weak self] note in
+        let favoriteObserver = NotificationCenter.default.addObserver(forName: .init("SongFavoriteToggled"), object: nil, queue: .main) { [weak self] note in
             guard let songId = note.object as? String else { return }
             Task { @MainActor in
                 self?.toggleFavorite(songId: songId)
             }
+        }
+        observerTokens.append(favoriteObserver)
+    }
+
+    deinit {
+        for observer in observerTokens {
+            NotificationCenter.default.removeObserver(observer)
         }
     }
 
@@ -62,42 +73,24 @@ class DataManager: ObservableObject {
             try? fm.createDirectory(at: songsFolder, withIntermediateDirectories: true)
         }
 
-        guard let subfolders = try? fm.contentsOfDirectory(
+        guard let initialSubfolders = try? fm.contentsOfDirectory(
             at: songsFolder,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
         ) else { return }
 
+        let sanitizedSubfolders = sanitizeSongFolders(initialSubfolders, in: songsFolder)
+        cleanupBrokenFolders(subfolders: sanitizedSubfolders)
+        let subfolders = sanitizedSubfolders.filter { fm.fileExists(atPath: $0.path) }
+
         print("[DEBUG] DataManager: Syncing library. Found \(subfolders.count) folders in Documents/Songs.")
 
-        let allDescriptor = FetchDescriptor<SongData>()
-        let existingSongs = (try? ctx.fetch(allDescriptor)) ?? []
-        
-        // 0. Deduplicate database (Fix for previous normalization bug)
-        var seenIDs = Set<String>()
-        var duplicatesToRemove = [SongData]()
-        for song in existingSongs {
-            let normalizedID = song.id.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
-            if seenIDs.contains(normalizedID) {
-                duplicatesToRemove.append(song)
-            } else {
-                seenIDs.insert(normalizedID)
-                if song.id != normalizedID { song.id = normalizedID } // Fix in-place
-            }
-        }
-        for dup in duplicatesToRemove {
-            print("[DEBUG] DataManager: Removing duplicate database entry: \(dup.id)")
-            ctx.delete(dup)
-        }
-        try? ctx.save()
-
-        // Re-fetch clean list
-        let cleanSongs = (try? ctx.fetch(allDescriptor)) ?? []
-        let foundIDs = Set(subfolders.map { $0.lastPathComponent.precomposedStringWithCanonicalMapping })
+        let cleanSongs = deduplicateSongData(in: ctx)
+        let foundIDKeys = Set(subfolders.map { normalizedSongIDKey($0.lastPathComponent) })
         
         // 1. Remove missing
         for song in cleanSongs {
-            if !foundIDs.contains(song.id) {
+            if !foundIDKeys.contains(normalizedSongIDKey(song.id)) {
                 print("[DEBUG] DataManager: Song folder removed, deleting from database: \(song.id)")
                 ctx.delete(song)
             }
@@ -105,49 +98,167 @@ class DataManager: ObservableObject {
 
         // 2. Sync each existing folder
         for folder in subfolders {
-            syncSingleSong(folderName: folder.lastPathComponent)
+            syncSingleSong(folderName: folder.lastPathComponent, shouldDeduplicate: false)
         }
         
-        // 3. Clean up empty/corrupted folders (those that didn't sync because they lack audio)
-        // 2. Sanitize Physical Folders (Fix trailing spaces on disk)
-        let songsDir = docs.appendingPathComponent("Songs")
-        
-        for folderURL in subfolders {
-            let originalName = folderURL.lastPathComponent
-            let sanitizedName = originalName.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
-            
-            if originalName != sanitizedName {
-                let newURL = songsDir.appendingPathComponent(sanitizedName)
-                print("[DEBUG] DataManager: Renaming folder to remove trailing spaces: '\(originalName)' -> '\(sanitizedName)'")
-                try? fm.moveItem(at: folderURL, to: newURL)
+        print("[DEBUG] DataManager: Sync complete.")
+        do {
+            try ctx.save()
+        } catch {
+            print("[DEBUG] DataManager: Failed saving sync changes: \(error.localizedDescription)")
+        }
+    }
+
+    private func normalizedSongID(_ id: String) -> String {
+        id.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizedSongIDKey(_ id: String) -> Data {
+        Data(normalizedSongID(id).utf8)
+    }
+
+    private func hasSameStoredString(_ lhs: String, _ rhs: String) -> Bool {
+        Data(lhs.utf8) == Data(rhs.utf8)
+    }
+
+    @discardableResult
+    private func deduplicateSongData(in ctx: ModelContext) -> [SongData] {
+        let descriptor = FetchDescriptor<SongData>()
+        let existingSongs = (try? ctx.fetch(descriptor)) ?? []
+        let groupedSongs = Dictionary(grouping: existingSongs) { normalizedSongIDKey($0.id) }
+        var survivors: [SongData] = []
+        var removedDuplicates = false
+
+        for (_, songs) in groupedSongs {
+            guard let firstSong = songs.first else { continue }
+            let normalizedID = normalizedSongID(firstSong.id)
+            let sortedSongs = songs.sorted { lhs, rhs in
+                let lhsExact = hasSameStoredString(lhs.id, normalizedID)
+                let rhsExact = hasSameStoredString(rhs.id, normalizedID)
+                if lhsExact != rhsExact { return lhsExact }
+                if lhs.isFavorited != rhs.isFavorited { return lhs.isFavorited }
+                return lhs.dateAdded < rhs.dateAdded
+            }
+
+            guard let survivor = sortedSongs.first else { continue }
+            survivors.append(survivor)
+
+            for duplicate in sortedSongs.dropFirst() {
+                mergeSongData(from: duplicate, into: survivor)
+                print("[DEBUG] DataManager: Removing duplicate database entry: \(duplicate.id)")
+                ctx.delete(duplicate)
+                removedDuplicates = true
             }
         }
 
-        cleanupBrokenFolders(subfolders: subfolders)
-        
-        print("[DEBUG] DataManager: Sync complete.")
-        try? ctx.save()
+        if removedDuplicates {
+            do {
+                try ctx.save()
+            } catch {
+                print("[DEBUG] DataManager: Failed removing duplicate songs: \(error.localizedDescription)")
+            }
+        }
+
+        var normalizedSurvivors = false
+        for survivor in survivors {
+            let normalizedID = normalizedSongID(survivor.id)
+            if !hasSameStoredString(survivor.id, normalizedID) {
+                survivor.id = normalizedID
+                normalizedSurvivors = true
+            }
+        }
+
+        if normalizedSurvivors {
+            do {
+                try ctx.save()
+            } catch {
+                print("[DEBUG] DataManager: Failed normalizing song IDs: \(error.localizedDescription)")
+            }
+        }
+
+        return (try? ctx.fetch(descriptor)) ?? survivors
+    }
+
+    private func mergeSongData(from duplicate: SongData, into survivor: SongData) {
+        if survivor.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            survivor.title = duplicate.title
+        }
+        if survivor.artist == "Unknown Artist", duplicate.artist != "Unknown Artist" {
+            survivor.artist = duplicate.artist
+        }
+        if survivor.albumTitle == "Unknown Album", duplicate.albumTitle != "Unknown Album" {
+            survivor.albumTitle = duplicate.albumTitle
+        }
+        if survivor.audioFilePath.isEmpty {
+            survivor.audioFilePath = duplicate.audioFilePath
+        }
+        if survivor.coverImagePath == nil {
+            survivor.coverImagePath = duplicate.coverImagePath
+        }
+        if survivor.subtitleFilePath == nil {
+            survivor.subtitleFilePath = duplicate.subtitleFilePath
+        }
+        if survivor.duration <= 0, duplicate.duration > 0 {
+            survivor.duration = duplicate.duration
+        }
+        if duplicate.dateAdded < survivor.dateAdded {
+            survivor.dateAdded = duplicate.dateAdded
+        }
+        if let duplicateLastPlayed = duplicate.lastPlayedDate {
+            if let survivorLastPlayed = survivor.lastPlayedDate {
+                survivor.lastPlayedDate = max(survivorLastPlayed, duplicateLastPlayed)
+            } else {
+                survivor.lastPlayedDate = duplicateLastPlayed
+            }
+        }
+        survivor.isFavorited = survivor.isFavorited || duplicate.isFavorited
+
+        for playlist in duplicate.playlists where !survivor.playlists.contains(where: { $0.id == playlist.id }) {
+            survivor.playlists.append(playlist)
+        }
+
+        if survivor.album == nil {
+            survivor.album = duplicate.album
+        }
+    }
+
+    private func sanitizeSongFolders(_ subfolders: [URL], in songsFolder: URL) -> [URL] {
+        let fm = FileManager.default
+        var sanitizedFolders: [URL] = []
+        var seenPaths = Set<String>()
+
+        for folderURL in subfolders {
+            let originalName = folderURL.lastPathComponent
+            let sanitizedName = originalName.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
+            var resolvedURL = folderURL
+
+            if originalName != sanitizedName {
+                let newURL = songsFolder.appendingPathComponent(sanitizedName)
+                print("[DEBUG] DataManager: Renaming folder to remove trailing spaces: '\(originalName)' -> '\(sanitizedName)'")
+
+                if !fm.fileExists(atPath: newURL.path) {
+                    try? fm.moveItem(at: folderURL, to: newURL)
+                }
+
+                if fm.fileExists(atPath: newURL.path) {
+                    resolvedURL = newURL
+                }
+            }
+
+            if fm.fileExists(atPath: resolvedURL.path), seenPaths.insert(resolvedURL.path).inserted {
+                sanitizedFolders.append(resolvedURL)
+            }
+        }
+
+        return sanitizedFolders
     }
 
     private func cleanupBrokenFolders(subfolders: [URL]) {
         let fm = FileManager.default
-        let audioExts = ["mp3", "wav", "m4a", "aac", "flac"]
         
         for folder in subfolders {
             guard let contents = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { continue }
-            
-            // Validation: Must have audio file AND it must be reasonably sized (> 500KB)
-            var hasValidAudio = false
-            for file in contents {
-                if audioExts.contains(file.pathExtension.lowercased()) {
-                    let attr = (try? fm.attributesOfItem(atPath: file.path)) ?? [:]
-                    let size = attr[.size] as? Int64 ?? 0
-                    if size > 500_000 { // 500KB min for a song
-                        hasValidAudio = true
-                        break
-                    }
-                }
-            }
+            let hasValidAudio = firstValidAudioFile(in: contents, fileManager: fm) != nil
             
             if !hasValidAudio {
                 print("[DEBUG] DataManager: Cleaning up broken/empty/corrupted folder: \(folder.lastPathComponent)")
@@ -167,8 +278,17 @@ class DataManager: ObservableObject {
                         print("[DEBUG] DataManager: Purging corrupted thumbnail: \(file.lastPathComponent)")
                         try? fm.removeItem(at: file)
                     } else {
-                        // Optional: Try to decode as extra safety (can be slow, but good for stability)
-                        if UIImage(contentsOfFile: file.path) == nil {
+                        // Check image header bytes instead of full decode (much faster)
+                        if let data = try? Data(contentsOf: file, options: .mappedIfSafe),
+                           data.count >= 4 {
+                            let isJPEG = data.starts(with: [0xFF, 0xD8, 0xFF])
+                            let isPNG = data.starts(with: [0x89, 0x50, 0x4E, 0x47])
+                            let isWebP = data.count >= 12 && data[8...11] == Data([0x57, 0x45, 0x42, 0x50])
+                            if !isJPEG && !isPNG && !isWebP {
+                                print("[DEBUG] DataManager: Purging unreadable image: \(file.lastPathComponent)")
+                                try? fm.removeItem(at: file)
+                            }
+                        } else {
                             print("[DEBUG] DataManager: Purging unreadable image: \(file.lastPathComponent)")
                             try? fm.removeItem(at: file)
                         }
@@ -178,13 +298,35 @@ class DataManager: ObservableObject {
         }
     }
 
+    private func firstValidAudioFile(in contents: [URL], fileManager: FileManager) -> URL? {
+        let audioExts = ["mp3", "wav", "m4a", "aac", "flac"]
+
+        for file in contents where audioExts.contains(file.pathExtension.lowercased()) {
+            let attr = (try? fileManager.attributesOfItem(atPath: file.path)) ?? [:]
+            let size = attr[.size] as? Int64 ?? 0
+            if size > 500_000 {
+                return file
+            }
+        }
+
+        return nil
+    }
+
     /// Surgically syncs a single song folder. Much faster for incremental updates.
     func syncSingleSong(folderName rawFolderName: String) {
-        let folderName = rawFolderName.precomposedStringWithCanonicalMapping
+        syncSingleSong(folderName: rawFolderName, shouldDeduplicate: true)
+    }
+
+    private func syncSingleSong(folderName rawFolderName: String, shouldDeduplicate: Bool) {
+        let folderName = rawFolderName.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let ctx = modelContext else { return }
         let fm = FileManager.default
         guard let docs = fm.urls(for: FileManager.SearchPathDirectory.documentDirectory, in: FileManager.SearchPathDomainMask.userDomainMask).first else { return }
         let songFolder = docs.appendingPathComponent("Songs").appendingPathComponent(folderName)
+
+        if shouldDeduplicate {
+            deduplicateSongData(in: ctx)
+        }
 
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: songFolder.path, isDirectory: &isDir), isDir.boolValue else { return }
@@ -192,36 +334,80 @@ class DataManager: ObservableObject {
         guard let contents = try? fm.contentsOfDirectory(at: songFolder, includingPropertiesForKeys: nil) else { return }
 
         print("[DEBUG] DataManager: Syncing folder '\(folderName)' (\(contents.count) files found)")
-        let audioExts = ["mp3", "wav", "m4a", "aac", "flac"]
         let imageExts = ["jpg", "jpeg", "png", "webp"]
         let subExts = ["vtt", "srv1", "txt"]
 
-        let audioFile = contents.first { audioExts.contains($0.pathExtension.lowercased()) }
+        let audioFile = firstValidAudioFile(in: contents, fileManager: fm)
         let coverFile = contents.first { imageExts.contains($0.pathExtension.lowercased()) }
         let subtitleFile = contents.first { subExts.contains($0.pathExtension.lowercased()) }
 
         guard let audio = audioFile else { return }
+
+        let inferredDateAdded = inferredSongDateAdded(audioFile: audio, songFolder: songFolder, fileManager: fm)
 
         let audioRelPath = "Songs/\(folderName)/\(audio.lastPathComponent)"
         let coverRelPath = coverFile != nil ? "Songs/\(folderName)/\(coverFile!.lastPathComponent)" : nil
         let subtitleRelPath = subtitleFile != nil ? "Songs/\(folderName)/\(subtitleFile!.lastPathComponent)" : nil
 
         let descriptor = FetchDescriptor<SongData>(predicate: #Predicate { $0.id == folderName })
-        if let existing = (try? ctx.fetch(descriptor))?.first {
+        let matchingSongs = ((try? ctx.fetch(descriptor)) ?? []).sorted { lhs, rhs in
+            let lhsExact = hasSameStoredString(lhs.id, folderName)
+            let rhsExact = hasSameStoredString(rhs.id, folderName)
+            if lhsExact != rhsExact { return lhsExact }
+            return lhs.dateAdded < rhs.dateAdded
+        }
+        if let existing = matchingSongs.first {
+            for duplicate in matchingSongs.dropFirst() {
+                mergeSongData(from: duplicate, into: existing)
+                print("[DEBUG] DataManager: Removing duplicate database entry: \(duplicate.id)")
+                ctx.delete(duplicate)
+            }
             if existing.audioFilePath != audioRelPath { existing.audioFilePath = audioRelPath }
             if existing.coverImagePath != coverRelPath { existing.coverImagePath = coverRelPath }
             if existing.subtitleFilePath != subtitleRelPath { existing.subtitleFilePath = subtitleRelPath }
+            if abs(existing.dateAdded.timeIntervalSince(inferredDateAdded)) > 1 {
+                existing.dateAdded = inferredDateAdded
+            }
         } else {
+            var title = folderName
+            var artist = "Unknown Artist"
+            
+            let parts = folderName.components(separatedBy: " - ")
+            if parts.count >= 2 {
+                artist = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                title = parts.dropFirst().joined(separator: " - ").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            
             let song = SongData(
                 id: folderName,
-                title: folderName,
+                title: title,
+                artist: artist,
                 audioFilePath: audioRelPath,
                 coverImagePath: coverRelPath,
-                subtitleFilePath: subtitleRelPath
+                subtitleFilePath: subtitleRelPath,
+                dateAdded: inferredDateAdded
             )
             ctx.insert(song)
         }
-        try? ctx.save()
+        do {
+            try ctx.save()
+        } catch {
+            print("[DEBUG] DataManager: Failed syncing folder '\(folderName)': \(error.localizedDescription)")
+        }
+    }
+
+    private func inferredSongDateAdded(audioFile: URL, songFolder: URL, fileManager: FileManager) -> Date {
+        let audioAttrs = (try? fileManager.attributesOfItem(atPath: audioFile.path)) ?? [:]
+        let folderAttrs = (try? fileManager.attributesOfItem(atPath: songFolder.path)) ?? [:]
+
+        let candidates = [
+            audioAttrs[.creationDate] as? Date,
+            audioAttrs[.modificationDate] as? Date,
+            folderAttrs[.creationDate] as? Date,
+            folderAttrs[.modificationDate] as? Date
+        ].compactMap { $0 }
+
+        return candidates.min() ?? .now
     }
 
     // MARK: - Fetch helpers
@@ -294,6 +480,38 @@ class DataManager: ObservableObject {
     }
 
     // MARK: - Song deletion
+    func resetLibraryForUITests() {
+        guard let ctx = modelContext else { return }
+        let fm = FileManager.default
+        guard let docs = fm.urls(for: FileManager.SearchPathDirectory.documentDirectory, in: FileManager.SearchPathDomainMask.userDomainMask).first else { return }
+
+        do {
+            let songsFolder = docs.appendingPathComponent("Songs")
+            if fm.fileExists(atPath: songsFolder.path) {
+                try fm.removeItem(at: songsFolder)
+            }
+            try fm.createDirectory(at: songsFolder, withIntermediateDirectories: true)
+        } catch {
+            debugPrint("Failed resetting Songs folder for UI tests: \(error.localizedDescription)")
+        }
+
+        if let songs = try? ctx.fetch(FetchDescriptor<SongData>()) {
+            for song in songs {
+                ctx.delete(song)
+            }
+        }
+
+        if let playlists = try? ctx.fetch(FetchDescriptor<PlaylistData>()) {
+            for playlist in playlists {
+                ctx.delete(playlist)
+            }
+        }
+
+        try? ctx.save()
+        NotificationCenter.default.post(name: .init("SongsFolderChanged"), object: nil)
+        NotificationCenter.default.post(name: .init("PlaylistsChanged"), object: nil)
+    }
+
     func deleteSongs(_ songs: [SongData]) {
         guard let ctx = modelContext else { return }
         let fm = FileManager.default

@@ -50,6 +50,8 @@ struct MiniPlayerView: View {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("miniPlayerPlayPause")
+                    .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
 
                     Button { player.next() } label: {
                         Image(systemName: "forward.fill")
@@ -88,8 +90,8 @@ struct MiniPlayerView: View {
     }
 
     private var progressFraction: Double {
-        guard player.duration > 0 else { return 0 }
-        return localCurrentTime / player.duration
+        guard player.duration.isFinite, player.duration > 0, localCurrentTime.isFinite else { return 0 }
+        return min(max(localCurrentTime / player.duration, 0), 1)
     }
 }
 
@@ -123,7 +125,7 @@ struct MiniPlayerBackgroundView: View {
             uiImage = cached
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .utility).async {
             let img = ImageCache.shared.image(for: path)
             DispatchQueue.main.async {
                 self.uiImage = img

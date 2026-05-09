@@ -2,6 +2,9 @@ import os
 import sys
 import subprocess
 import json
+import re
+import time
+import threading
 import urllib.request
 import urllib.parse
 from flask import Flask, request, send_file, abort, jsonify, url_for
@@ -10,6 +13,66 @@ app = Flask(__name__)
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 COOKIE_FILE = os.path.join(BASE_DIR, 'youtube_cookies.txt')
+YTDLP_RUNTIME_CONFIG_FILE = os.path.join(BASE_DIR, 'yt-dlp-runtime.json')
+DEFAULT_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36'
+VIDEO_ID_RE = re.compile(r'^[A-Za-z0-9_-]{11}$')
+RETRYABLE_YTDLP_ERRORS = (
+    'The page needs to be reloaded',
+    'Remote end closed connection',
+    'Connection reset by peer',
+    'timed out',
+    'Temporary failure in name resolution',
+    'Requested format is not available',
+    'HTTP Error 5',
+    'Empty reply from server',
+)
+
+
+def is_valid_video_id(video_id):
+    return bool(video_id and VIDEO_ID_RE.fullmatch(video_id))
+
+
+def is_valid_cached_mp3(path):
+    return os.path.exists(path) and os.path.getsize(path) > 500_000
+
+
+def is_retryable_yt_dlp_error(output):
+    output = (output or '').strip()
+    return any(fragment in output for fragment in RETRYABLE_YTDLP_ERRORS)
+
+
+def normalize_playlist_url(raw_url):
+    decoded = urllib.parse.unquote(raw_url or '').strip()
+    if not decoded:
+        return decoded
+
+    parsed = urllib.parse.urlparse(decoded)
+    query = urllib.parse.parse_qs(parsed.query)
+    playlist_id = query.get('list', [None])[0]
+    video_id = query.get('v', [None])[0]
+    index = query.get('index', [None])[0]
+    host = (parsed.netloc or '').lower()
+
+    if 'music.youtube.com' in host:
+        if playlist_id and video_id:
+            watch_query = [('v', video_id), ('list', playlist_id)]
+            if index:
+                watch_query.append(('index', index))
+            return 'https://www.youtube.com/watch?' + urllib.parse.urlencode(watch_query)
+
+        if playlist_id:
+            return f'https://www.youtube.com/playlist?list={playlist_id}'
+
+    if playlist_id and video_id:
+        watch_query = [('v', video_id), ('list', playlist_id)]
+        if index:
+            watch_query.append(('index', index))
+        return 'https://www.youtube.com/watch?' + urllib.parse.urlencode(watch_query)
+
+    if playlist_id:
+        return f'https://www.youtube.com/playlist?list={playlist_id}'
+
+    return decoded
 
 def setup_node():
     node_dir = os.path.join(BASE_DIR, 'node-v20.11.1-linux-x64')
@@ -42,6 +105,48 @@ def update_yt_dlp():
             continue
     raise Exception(f"Failed to update yt-dlp: {last_err}")
 
+
+def _normalize_string_list(value):
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def load_ytdlp_runtime_config():
+    config = {
+        'userAgent': DEFAULT_USER_AGENT,
+        'jsRuntimes': ['node'],
+        'remoteComponents': ['ejs:github'],
+        'extractorArgs': [],
+        'providerExtractorArgs': [],
+        'poToken': '',
+    }
+
+    if not os.path.exists(YTDLP_RUNTIME_CONFIG_FILE):
+        return config
+
+    try:
+        with open(YTDLP_RUNTIME_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            raw = json.load(f)
+    except Exception:
+        return config
+
+    if isinstance(raw.get('userAgent'), str) and raw['userAgent'].strip():
+        config['userAgent'] = raw['userAgent'].strip()
+
+    config['jsRuntimes'] = _normalize_string_list(raw.get('jsRuntimes')) or config['jsRuntimes']
+    config['remoteComponents'] = _normalize_string_list(raw.get('remoteComponents')) or config['remoteComponents']
+    config['extractorArgs'] = _normalize_string_list(raw.get('extractorArgs'))
+    config['providerExtractorArgs'] = _normalize_string_list(raw.get('providerExtractorArgs'))
+
+    po_token = raw.get('poToken')
+    if isinstance(po_token, str):
+        config['poToken'] = po_token.strip()
+
+    return config
+
 @app.route("/check")
 def check_version():
     try:
@@ -72,10 +177,112 @@ def fix_deps():
 STORAGE_DIR = os.path.join(BASE_DIR, 'storage')
 AUDIO_DIR   = os.path.join(STORAGE_DIR, 'audio')
 INFO_DIR    = os.path.join(STORAGE_DIR, 'info')
+PROCESSING_DIR = os.path.join(STORAGE_DIR, 'processing')
+PROCESSING_TTL_SECONDS = 20 * 60
 
-for d in [AUDIO_DIR, INFO_DIR]:
+for d in [AUDIO_DIR, INFO_DIR, PROCESSING_DIR]:
     if not os.path.exists(d):
         os.makedirs(d, exist_ok=True)
+
+
+def processing_marker_path(video_id):
+    return os.path.join(PROCESSING_DIR, f"{video_id}.lock")
+
+
+def processing_error_path(video_id):
+    return os.path.join(PROCESSING_DIR, f"{video_id}.error")
+
+
+def clear_processing_state(video_id):
+    for path in [processing_marker_path(video_id), processing_error_path(video_id)]:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def get_processing_state(video_id):
+    marker_path = processing_marker_path(video_id)
+    if not os.path.exists(marker_path):
+        return None
+
+    try:
+        age = time.time() - os.path.getmtime(marker_path)
+    except OSError:
+        clear_processing_state(video_id)
+        return None
+
+    if age > PROCESSING_TTL_SECONDS:
+        clear_processing_state(video_id)
+        return None
+
+    error_path = processing_error_path(video_id)
+    if os.path.exists(error_path):
+        try:
+            with open(error_path, 'r', encoding='utf-8') as f:
+                error_text = f.read().strip()
+        except OSError:
+            error_text = ''
+        return {"status": "failed", "error": error_text or "Audio conversion failed."}
+
+    return {"status": "processing"}
+
+
+def mark_processing_started(video_id):
+    marker_path = processing_marker_path(video_id)
+    error_path = processing_error_path(video_id)
+    if os.path.exists(marker_path):
+        return False
+
+    with open(marker_path, 'w', encoding='utf-8') as f:
+        f.write(str(time.time()))
+
+    if os.path.exists(error_path):
+        try:
+            os.remove(error_path)
+        except OSError:
+            pass
+
+    return True
+
+
+def write_processing_error(video_id, message):
+    try:
+        with open(processing_error_path(video_id), 'w', encoding='utf-8') as f:
+            f.write((message or '').strip())
+    except OSError:
+        pass
+
+
+def generate_audio_for_video(video_id):
+    cached_file = os.path.join(AUDIO_DIR, f"{video_id}.mp3")
+    outtmpl = os.path.join(AUDIO_DIR, f"{video_id}.%(ext)s")
+
+    if os.path.exists(cached_file) and not is_valid_cached_mp3(cached_file):
+        try:
+            os.remove(cached_file)
+        except OSError:
+            pass
+
+    try:
+        run_yt_dlp([
+            '-x', '--audio-format', 'mp3',
+            '--audio-quality', '6',
+            '--ffmpeg-location', '/usr/bin',
+            '-o', outtmpl,
+            f"https://www.youtube.com/watch?v={video_id}"
+        ])
+
+        if not is_valid_cached_mp3(cached_file):
+            write_processing_error(video_id, 'MP3 file not found after conversion')
+    except subprocess.CalledProcessError as e:
+        write_processing_error(video_id, f"Conversion failed: {e.output.decode(errors='ignore')}")
+    except Exception as e:
+        write_processing_error(video_id, f"Conversion failed: {e}")
+    finally:
+        if is_valid_cached_mp3(cached_file):
+            clear_processing_state(video_id)
 
 def run_yt_dlp(args):
     setup_node()
@@ -83,18 +290,59 @@ def run_yt_dlp(args):
     if not os.path.exists(binary_path):
         binary_path = update_yt_dlp()
 
-    cmd = [binary_path, '--cookies', COOKIE_FILE, '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', '--js-runtimes', 'node'] + args
-    
-    # Use Popen to capture properly and handle non-zero exit codes if output is still present
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    stdout, _ = process.communicate()
-    output = stdout.decode('utf-8', errors='ignore')
-    
-    # If it failed and we have no output, or it's a hard error
-    if process.returncode != 0 and not output.strip().startswith('{'):
-        raise subprocess.CalledProcessError(process.returncode, cmd, output=stdout)
-        
-    return output
+    runtime_config = load_ytdlp_runtime_config()
+
+    base_cmd = [
+        binary_path,
+        '--user-agent', runtime_config['userAgent'],
+        '--js-runtimes', ','.join(runtime_config['jsRuntimes']),
+    ]
+
+    for remote_component in runtime_config['remoteComponents']:
+        base_cmd.extend(['--remote-components', remote_component])
+
+    shared_extractor_args = list(runtime_config['extractorArgs'])
+    if runtime_config['poToken']:
+        shared_extractor_args.append(f"youtube:po_token={runtime_config['poToken']}")
+
+    variant_extractor_sets = [shared_extractor_args]
+    if runtime_config['providerExtractorArgs']:
+        variant_extractor_sets.insert(0, shared_extractor_args + runtime_config['providerExtractorArgs'])
+
+    arg_variants = []
+    cookie_variants = [[]]
+    if os.path.exists(COOKIE_FILE):
+        cookie_variants.insert(0, ['--cookies', COOKIE_FILE])
+
+    for cookie_args in cookie_variants:
+        for extractor_args in variant_extractor_sets:
+            variant = list(cookie_args)
+            for extractor_arg in extractor_args:
+                variant.extend(['--extractor-args', extractor_arg])
+            arg_variants.append(variant)
+
+    last_error = None
+    for extra_args in arg_variants:
+        for attempt in range(3):
+            cmd = base_cmd + extra_args + args
+
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            stdout, _ = process.communicate()
+            output = stdout.decode('utf-8', errors='ignore')
+
+            if process.returncode == 0 or output.strip().startswith('{'):
+                return output
+
+            last_error = subprocess.CalledProcessError(process.returncode, cmd, output=stdout)
+            if not is_retryable_yt_dlp_error(output):
+                break
+
+            time.sleep(1 + attempt)
+
+    if last_error:
+        raise last_error
+
+    raise RuntimeError('yt-dlp failed without producing any output')
 
 
 @app.route("/download")
@@ -102,29 +350,32 @@ def download_audio():
     video_id = request.args.get("id")
     if not video_id:
         return jsonify({"error": "Missing `id` parameter"}), 400
+    if not is_valid_video_id(video_id):
+        return jsonify({"error": "Invalid `id` parameter"}), 400
 
     cached_file = os.path.join(AUDIO_DIR, f"{video_id}.mp3")
-    if os.path.exists(cached_file):
+    if is_valid_cached_mp3(cached_file):
+        clear_processing_state(video_id)
         return send_file(cached_file, as_attachment=True)
-
-    outtmpl = os.path.join(AUDIO_DIR, f"{video_id}.%(ext)s")
-    
-    try:
-        run_yt_dlp([
-            '-x', '--audio-format', 'mp3',
-            '--ffmpeg-location', '/usr/bin',
-            '-o', outtmpl,
-            f"https://www.youtube.com/watch?v={video_id}"
-        ])
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": f"Conversion failed: {e.output.decode()}"}), 500
-    except Exception as e:
-        return jsonify({"error": f"Conversion failed: {e}"}), 500
-
     if os.path.exists(cached_file):
-        return send_file(cached_file, as_attachment=True)
-    else:
-        return jsonify({"error": "MP3 file not found after conversion"}), 500
+        try:
+            os.remove(cached_file)
+        except OSError:
+            pass
+
+    processing_state = get_processing_state(video_id)
+    if processing_state:
+        status_code = 500 if processing_state["status"] == "failed" else 202
+        return jsonify(processing_state), status_code
+
+    if mark_processing_started(video_id):
+        worker = threading.Thread(target=generate_audio_for_video, args=(video_id,), daemon=True)
+        worker.start()
+
+    return jsonify({
+        "status": "processing",
+        "error": "Audio is being prepared. Retry shortly."
+    }), 202
 
 
 # ── LRCLIB integration ──────────────────────────────────────────────
@@ -263,6 +514,8 @@ def video_info():
     video_id = request.args.get("id")
     if not video_id:
         return jsonify({"error": "Missing `id` parameter"}), 400
+    if not is_valid_video_id(video_id):
+        return jsonify({"error": "Invalid `id` parameter"}), 400
 
     cached_info = os.path.join(INFO_DIR, f"{video_id}.json")
     if os.path.exists(cached_info):
@@ -332,10 +585,9 @@ def playlist_info():
     
     if not playlist_url and not playlist_id:
         return jsonify({"error": "Missing `url` or `id` parameter"}), 400
-        
+
     if playlist_url:
-        import urllib.parse
-        playlist_url = urllib.parse.unquote(playlist_url)
+        playlist_url = normalize_playlist_url(playlist_url)
     elif playlist_id:
         playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
 
@@ -345,7 +597,19 @@ def playlist_info():
     if os.path.exists(cached_playlist):
         try:
             with open(cached_playlist, 'r') as f:
-                return jsonify(json.load(f))
+                cached_data = json.load(f)
+                playlist_cover = cached_data.get('coverUrl', '')
+                if playlist_cover:
+                    videos = cached_data.get('videos', [])
+                    changed = False
+                    for video in videos:
+                        if not video.get('coverUrl'):
+                            video['coverUrl'] = playlist_cover
+                            changed = True
+                    if changed:
+                        with open(cached_playlist, 'w') as wf:
+                            json.dump(cached_data, wf)
+                return jsonify(cached_data)
         except:
             pass
 
@@ -387,7 +651,13 @@ def playlist_info():
         title    = entry.get("title", vid_id)
         artist   = entry.get("artist") or entry.get("uploader") or entry.get("channel") or playlist_artist
         album    = entry.get("album") or playlist_title
-        thumb    = entry.get("thumbnail", "")
+        entry_thumbs = entry.get("thumbnails", [])
+        thumb = entry.get("thumbnail", "")
+        if not thumb and entry_thumbs:
+            best_entry_thumb = sorted(entry_thumbs, key=lambda x: x.get('width', 0) or 0, reverse=True)[0]
+            thumb = best_entry_thumb.get("url", "")
+        if not thumb:
+            thumb = playlist_cover
         duration = entry.get("duration", 0)
         audio    = url_for('download_audio', id=vid_id, _external=True)
         videos.append({

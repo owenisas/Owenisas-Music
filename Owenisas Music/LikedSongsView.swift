@@ -132,8 +132,8 @@ struct LikedSongsView: View {
                 .listRowBackground(Color.clear)
                 .frame(maxWidth: .infinity)
             } else {
-                ForEach(Array(songs.enumerated()), id: \.element.id) { index, song in
-                    let songData = likedSongs[index]
+                ForEach(Array(zip(likedSongs, songs).enumerated()), id: \.offset) { index, pair in
+                    let (songData, song) = pair
                     SongRow(song: song, index: index + 1, onRemove: {
                         toggleFavorite(songData: songData)
                     })

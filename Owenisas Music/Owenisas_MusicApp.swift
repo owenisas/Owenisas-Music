@@ -62,6 +62,9 @@ struct Owenisas_MusicApp: App {
             .onAppear {
                 setupAppearance()
                 dataManager.configure(with: sharedModelContainer.mainContext)
+                if ProcessInfo.processInfo.arguments.contains("UI_TEST_RESET_LIBRARY") {
+                    dataManager.resetLibraryForUITests()
+                }
                 createSongsFolderIfNeeded()
                 dataManager.syncFromFileSystem()
                 cleanupTemporaryFiles()
@@ -102,13 +105,17 @@ struct Owenisas_MusicApp: App {
     private func cleanupTemporaryFiles() {
         DispatchQueue.global(qos: .background).async {
             let fm = FileManager.default
-            guard let cacheURL = fm.urls(for: .cachesDirectory, in: .userDomainMask).first else { return }
+            let tmpDir = fm.temporaryDirectory
             
-            guard let files = try? fm.contentsOfDirectory(at: cacheURL, includingPropertiesForKeys: [.creationDateKey]) else { return }
+            guard let files = try? fm.contentsOfDirectory(at: tmpDir, includingPropertiesForKeys: [.creationDateKey]) else { return }
             
             let expirationDate = Date().addingTimeInterval(-2 * 60 * 60) // 2 hours ago
             
             for file in files {
+                // Only clean up files created by our download flow (.vtt, .mp3, .jpg, etc.)
+                let ext = file.pathExtension.lowercased()
+                guard ["vtt", "mp3", "jpg", "jpeg", "png", "webp", "srv1"].contains(ext) else { continue }
+                
                 do {
                     let attrs = try fm.attributesOfItem(atPath: file.path)
                     if let creationDate = attrs[.creationDate] as? Date {
@@ -117,7 +124,7 @@ struct Owenisas_MusicApp: App {
                         }
                     }
                 } catch {
-                    // Ignore errors for system files that can't be deleted
+                    // Ignore errors for files that can't be deleted
                 }
             }
         }

@@ -130,6 +130,14 @@ final class PlaylistData {
     }
 }
 
+// MARK: - Subtitle language cache
+
+private class SubtitleLangCacheEntry {
+    let languages: [(code: String, name: String)]
+    init(languages: [(code: String, name: String)]) { self.languages = languages }
+}
+private let _subtitleLangCache = NSCache<NSString, SubtitleLangCacheEntry>()
+
 // MARK: - Lightweight struct for the player (non-SwiftData)
 
 struct Song: Identifiable, Equatable {
@@ -155,7 +163,17 @@ struct Song: Identifiable, Equatable {
     /// Returns tuples of (language code, display name) sorted alphabetically.
     /// Files named `{title}.{lang}.vtt` are recognized; plain `{title}.vtt` maps to "original".
     var availableSubtitleLanguages: [(code: String, name: String)] {
-        guard let folder = songFolderURL else { return [] }
+        Self.subtitleLanguagesCache(for: songFolderURL)
+    }
+
+    /// Cached subtitle language discovery to avoid repeated filesystem scans.
+    private static func subtitleLanguagesCache(for folder: URL?) -> [(code: String, name: String)] {
+        guard let folder = folder else { return [] }
+        let cacheKey = folder.path as NSString
+        if let cached = _subtitleLangCache.object(forKey: cacheKey) {
+            return cached.languages
+        }
+
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { return [] }
 
@@ -176,11 +194,13 @@ struct Song: Identifiable, Equatable {
             }
         }
         // Put "Lyrics ✦" first, then sort the rest
-        return languages.sorted {
+        let result = languages.sorted {
             if $0.code == "lyrics" { return true }
             if $1.code == "lyrics" { return false }
             return $0.name < $1.name
         }
+        _subtitleLangCache.setObject(SubtitleLangCacheEntry(languages: result), forKey: cacheKey)
+        return result
     }
 
     /// Get the subtitle file URL for a specific language code.

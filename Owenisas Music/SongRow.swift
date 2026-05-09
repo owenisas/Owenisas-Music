@@ -107,13 +107,14 @@ struct SongRow: View {
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
+        .accessibilityIdentifier("songRow")
     }
 }
 
 // MARK: - Animated "Now Playing" Bars
 struct NowPlayingBars: View {
     @State private var heights: [CGFloat] = [0.4, 0.6, 0.3]
-    let timer = Timer.publish(every: 0.4, on: .main, in: .common).autoconnect()
+    @State private var isAnimating = false
 
     var body: some View {
         HStack(spacing: 2) {
@@ -124,10 +125,22 @@ struct NowPlayingBars: View {
                     .scaleEffect(y: heights[i], anchor: .bottom)
             }
         }
-        .onReceive(timer) { _ in
-            withAnimation(.easeInOut(duration: 0.35)) {
-                heights = (0..<3).map { _ in CGFloat.random(in: 0.25...1.0) }
-            }
+        .onAppear {
+            isAnimating = true
+            animate()
+        }
+        .onDisappear {
+            isAnimating = false
+        }
+    }
+
+    private func animate() {
+        guard isAnimating else { return }
+        withAnimation(.easeInOut(duration: 0.35)) {
+            heights = (0..<3).map { _ in CGFloat.random(in: 0.25...1.0) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            animate()
         }
     }
 }

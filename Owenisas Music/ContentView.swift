@@ -88,7 +88,7 @@ struct ContentView: View {
     private var recentlyAddedCarousel: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 14) {
-                ForEach(allSongs.prefix(10), id: \.id) { songData in
+                ForEach(Array(allSongs.prefix(10).enumerated()), id: \.offset) { _, songData in
                     let song = Song.from(songData)
                     Button {
                         player.play(song: song, in: dataManager.toSongs(allSongs))
@@ -329,7 +329,7 @@ struct ContentView: View {
             }
             .padding(.bottom, 14)
 
-            ForEach(Array(allSongs.enumerated()), id: \.element.id) { index, songData in
+            ForEach(Array(allSongs.enumerated()), id: \.offset) { index, songData in
                 let song = Song.from(songData)
                 SongRow(song: song, index: index + 1, onAdd: {
                     songToAddToPlaylist = songData

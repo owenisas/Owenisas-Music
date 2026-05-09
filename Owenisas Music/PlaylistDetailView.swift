@@ -179,8 +179,8 @@ struct PlaylistDetailView: View {
             .listRowSeparator(.hidden)
             .padding(.bottom, 8)
 
-            ForEach(Array(songs.enumerated()), id: \.element.id) { index, song in
-                let songData = playlist.songs[index]
+            ForEach(Array(zip(playlist.songs, songs).enumerated()), id: \.offset) { index, pair in
+                let (songData, song) = pair
                 SongRow(song: song, index: index + 1, onRemove: {
                     dataManager.removeSong(songData, from: playlist)
                 })

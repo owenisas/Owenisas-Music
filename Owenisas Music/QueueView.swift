@@ -43,7 +43,8 @@ struct QueueView: View {
 
                         // Up Next Section
                         Section {
-                            let upNext = Array(player.queue.suffix(from: min(player.currentIndex + 1, player.queue.count)))
+                            let startIndex = player.currentSong == nil ? 0 : min(player.currentIndex + 1, player.queue.count)
+                            let upNext = Array(player.queue.suffix(from: startIndex))
                             if upNext.isEmpty {
                                 HStack {
                                     Spacer()
@@ -60,7 +61,7 @@ struct QueueView: View {
                                 }
                                 .listRowBackground(Color.clear)
                             } else {
-                                ForEach(Array(upNext.enumerated()), id: \.element.id) { index, song in
+                                ForEach(Array(upNext.enumerated()), id: \.offset) { index, song in
                                     HStack(spacing: 12) {
                                         coverThumb(for: song)
                                         VStack(alignment: .leading, spacing: 2) {
@@ -77,7 +78,8 @@ struct QueueView: View {
                                     .padding(.vertical, 2)
                                     .contentShape(Rectangle())
                                     .onTapGesture {
-                                        let realIndex = player.currentIndex + 1 + index
+                                        let startIndex = player.currentSong == nil ? 0 : player.currentIndex + 1
+                                        let realIndex = startIndex + index
                                         if realIndex < player.queue.count {
                                             player.play(song: player.queue[realIndex], in: nil)
                                         }
@@ -92,7 +94,8 @@ struct QueueView: View {
                                     .font(.system(size: 13, weight: .bold, design: .rounded))
                                     .textCase(nil)
                                 Spacer()
-                                let count = max(player.queue.count - player.currentIndex - 1, 0)
+                                let startIndex = player.currentSong == nil ? 0 : min(player.currentIndex + 1, player.queue.count)
+                                let count = max(player.queue.count - startIndex, 0)
                                 if count > 0 {
                                     Text("\(count) songs")
                                         .font(.system(size: 12, weight: .medium))
