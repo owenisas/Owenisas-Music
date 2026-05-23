@@ -32,7 +32,7 @@ fastlane/test_output
 # Python / Backend
 __pycache__/
 *.pyc
-youtube_cookies.txt
+*cookies.txt
 backend/node-v20.11.1-linux-x64/
 backend/node.tar.xz
 backend/yt-dlp

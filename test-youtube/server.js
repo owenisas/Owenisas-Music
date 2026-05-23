@@ -11,6 +11,53 @@ if (typeof dns.setDefaultResultOrder === 'function') {
   dns.setDefaultResultOrder('ipv4first');
 }
 
+// Cookie Loader and Parser
+function loadCookies() {
+  // 1. Try environment variable first (raw cookie string)
+  if (process.env.YT_COOKIE) {
+    return process.env.YT_COOKIE;
+  }
+
+  // 2. Try looking for Netscape cookies.txt file in the workspace
+  const cookiePaths = [
+    path.join(__dirname, 'youtube_cookies.txt'),
+    path.join(__dirname, 'www.youtube.com_cookies.txt'),
+    path.join(__dirname, '../youtube_cookies.txt'),
+    path.join(__dirname, '../www.youtube.com_cookies.txt'),
+  ];
+
+  for (const p of cookiePaths) {
+    if (fs.existsSync(p)) {
+      try {
+        const content = fs.readFileSync(p, 'utf8');
+        const cookieArray = [];
+        const lines = content.split('\n');
+        
+        for (let line of lines) {
+          line = line.trim();
+          if (!line || line.startsWith('#')) continue;
+          
+          const parts = line.split('\t');
+          if (parts.length >= 7) {
+            const name = parts[5];
+            const value = parts[6];
+            cookieArray.push(`${name}=${value}`);
+          }
+        }
+        
+        if (cookieArray.length > 0) {
+          console.log(`[Cookies] Loaded ${cookieArray.length} cookies from file: ${path.basename(p)}`);
+          return cookieArray.join('; ');
+        }
+      } catch (err) {
+        console.error(`[Cookies Error] Failed reading cookie file: ${err.message}`);
+      }
+    }
+  }
+
+  return null;
+}
+
 // Extraction helpers
 function extractPlayerResponse(html) {
   const markers = [
@@ -132,14 +179,21 @@ async function fetchInnertubeMetadata(videoId, apiKey, sts) {
 
   const endpoint = `https://www.youtube.com/youtubei/v1/player?key=${apiKey}&prettyPrint=false`;
   
+  const headers = {
+    'Content-Type': 'application/json',
+    'User-Agent': payload.context.client.userAgent,
+    'Origin': 'https://www.youtube.com',
+    'Referer': `https://www.youtube.com/watch?v=${videoId}`
+  };
+
+  const cookieString = loadCookies();
+  if (cookieString) {
+    headers['Cookie'] = cookieString;
+  }
+
   const res = await fetch(endpoint, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'User-Agent': payload.context.client.userAgent,
-      'Origin': 'https://www.youtube.com',
-      'Referer': `https://www.youtube.com/watch?v=${videoId}`
-    },
+    headers: headers,
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(15000)
   });
@@ -190,12 +244,20 @@ const server = http.createServer(async (req, res) => {
 
     try {
       const watchUrl = `https://www.youtube.com/watch?v=${videoId}&bpctr=9999999999&has_verified=1&hl=en&gl=US`;
+      
+      const headers = {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+      };
+
+      const cookieString = loadCookies();
+      if (cookieString) {
+        headers['Cookie'] = cookieString;
+      }
+
       const watchRes = await fetch(watchUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
-          'Accept': '*/*',
-          'Accept-Language': 'en-US,en;q=0.9',
-        },
+        headers: headers,
         signal: AbortSignal.timeout(15000)
       });
 
@@ -264,6 +326,11 @@ const server = http.createServer(async (req, res) => {
 
       if (req.headers.range) {
         requestHeaders['Range'] = req.headers.range;
+      }
+
+      const cookieString = loadCookies();
+      if (cookieString) {
+        requestHeaders['Cookie'] = cookieString;
       }
 
       // NO AbortSignal.timeout here to allow long stream downloads to finish
