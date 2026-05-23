@@ -269,6 +269,10 @@ const server = http.createServer(async (req, res) => {
       let playerResponse = extractPlayerResponse(html);
 
       if (!playerResponse) {
+        console.error(`[Info Error] extractPlayerResponse failed. HTML length: ${html.length}. First 600 chars:`);
+        console.error(html.substring(0, 600));
+        const titleMatch = html.match(/<title>(.*?)<\/title>/i);
+        console.error(`[Info Error] Page Title: ${titleMatch ? titleMatch[1] : 'No Title Tag'}`);
         throw new Error('Could not parse playerResponse from watch page');
       }
 
