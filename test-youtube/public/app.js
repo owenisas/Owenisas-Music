@@ -1,6 +1,5 @@
 const urlInput = document.getElementById('url-input');
 const downloadBtn = document.getElementById('download-btn');
-// Use absolute URL if the page is opened from the local filesystem (file://)
 const proxyBase = window.location.origin.startsWith('file') ? 'http://localhost:3000' : '';
 
 const metadataCard = document.getElementById('metadata-card');
@@ -16,7 +15,23 @@ const progressContainer = document.getElementById('progress-container');
 const progressBar = document.getElementById('progress-bar');
 const statusLabel = document.getElementById('status-label');
 const percentLabel = document.getElementById('percent-label');
+
+const consoleTrigger = document.getElementById('console-trigger');
+const consoleDrawer = document.getElementById('console-drawer');
 const consoleDiv = document.getElementById('console');
+
+// Custom Audio Player Elements
+const customPlayer = document.getElementById('custom-player');
+const playerPlayBtn = document.getElementById('player-play-btn');
+const playIcon = document.getElementById('play-icon');
+const pauseIcon = document.getElementById('pause-icon');
+const playerProgress = document.getElementById('player-progress');
+const playerCurrentTime = document.getElementById('player-current-time');
+const playerDuration = document.getElementById('player-duration');
+const playerVolume = document.getElementById('player-volume');
+const hiddenAudio = document.getElementById('hidden-audio-element');
+
+let currentBlobUrl = null;
 
 function log(message, type = 'info') {
   const line = document.createElement('div');
@@ -55,6 +70,19 @@ function resolveCipher(cipherValue) {
   return baseUrl || '';
 }
 
+function formatTime(seconds) {
+  if (isNaN(seconds)) return '0:00';
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+// Console Drawer Toggle
+consoleTrigger.addEventListener('click', () => {
+  consoleDrawer.classList.toggle('open');
+  consoleTrigger.textContent = consoleDrawer.classList.contains('open') ? '⚙️ Hide Dev Console' : '⚙️ Show Dev Console';
+});
+
 // 1. Fetch metadata & populate format dropdown
 downloadBtn.addEventListener('click', async () => {
   const input = urlInput.value;
@@ -66,12 +94,25 @@ downloadBtn.addEventListener('click', async () => {
     return;
   }
   
+  // Clean up previous playback resources
+  if (currentBlobUrl) {
+    log("Releasing previous audio memory URL...");
+    hiddenAudio.pause();
+    hiddenAudio.src = '';
+    URL.revokeObjectURL(currentBlobUrl);
+    currentBlobUrl = null;
+    customPlayer.style.display = 'none';
+    playIcon.style.display = 'block';
+    pauseIcon.style.display = 'none';
+  }
+  
   downloadBtn.disabled = true;
   urlInput.disabled = true;
   metadataCard.style.display = 'block';
   formatSelectorContainer.style.display = 'none';
   progressContainer.style.display = 'none';
   metadataThumbnail.style.display = 'none';
+  customPlayer.style.display = 'none';
   
   metadataTitle.textContent = "Fetching video details...";
   metadataArtist.textContent = "";
@@ -163,6 +204,15 @@ startDownloadBtn.addEventListener('click', async () => {
   if (!audioDownloadUrl) {
     alert("Could not resolve streaming URL for this format.");
     return;
+  }
+  
+  // Clean up any previous playing item
+  if (currentBlobUrl) {
+    hiddenAudio.pause();
+    hiddenAudio.src = '';
+    URL.revokeObjectURL(currentBlobUrl);
+    currentBlobUrl = null;
+    customPlayer.style.display = 'none';
   }
   
   startDownloadBtn.disabled = true;
@@ -273,21 +323,29 @@ startDownloadBtn.addEventListener('click', async () => {
     const title = metadataTitle.textContent;
     const author = metadataArtist.textContent;
     const safeFilename = `${author} - ${title}`.replace(/[\\/:*?"<>|]/g, "") + `.${fileExtension}`;
-    const blobUrl = URL.createObjectURL(audioBlob);
     
+    // Save blob url globally so preview works
+    currentBlobUrl = URL.createObjectURL(audioBlob);
+    
+    // Trigger direct local download
     const downloadLink = document.createElement('a');
-    downloadLink.href = blobUrl;
+    downloadLink.href = currentBlobUrl;
     downloadLink.download = safeFilename;
     document.body.appendChild(downloadLink);
     downloadLink.click();
     document.body.removeChild(downloadLink);
     
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 100);
-    
     progressBar.style.width = '100%';
     percentLabel.textContent = '100%';
     statusLabel.textContent = 'Done!';
     log(`File saved: ${safeFilename}`, 'success');
+    
+    // Init Audio Preview Player
+    hiddenAudio.src = currentBlobUrl;
+    hiddenAudio.volume = playerVolume.value / 100;
+    hiddenAudio.load();
+    customPlayer.style.display = 'flex';
+    log(`Local preview player loaded. Press Play below to listen.`, 'success');
     
   } catch (error) {
     log(`Download failed: ${error.message}`, 'error');
@@ -301,4 +359,65 @@ startDownloadBtn.addEventListener('click', async () => {
     urlInput.disabled = false;
     formatSelect.disabled = false;
   }
+});
+
+// --- Custom Player Controls ---
+
+// Play/Pause Playback
+playerPlayBtn.addEventListener('click', () => {
+  if (hiddenAudio.paused) {
+    hiddenAudio.play();
+    playIcon.style.display = 'none';
+    pauseIcon.style.display = 'block';
+  } else {
+    hiddenAudio.pause();
+    playIcon.style.display = 'block';
+    pauseIcon.style.display = 'none';
+  }
+});
+
+// Update timeline duration on metadata load
+hiddenAudio.addEventListener('loadedmetadata', () => {
+  playerDuration.textContent = formatTime(hiddenAudio.duration);
+});
+
+// Update progress slider as audio plays
+hiddenAudio.addEventListener('timeupdate', () => {
+  if (!isNaN(hiddenAudio.duration)) {
+    const val = (hiddenAudio.currentTime / hiddenAudio.duration) * 100;
+    playerProgress.value = val;
+    playerCurrentTime.textContent = formatTime(hiddenAudio.currentTime);
+  }
+});
+
+// Seek audio position
+playerProgress.addEventListener('input', () => {
+  if (!isNaN(hiddenAudio.duration)) {
+    const seekTime = (playerProgress.value / 100) * hiddenAudio.duration;
+    hiddenAudio.currentTime = seekTime;
+  }
+});
+
+// Adjust volume
+playerVolume.addEventListener('input', () => {
+  hiddenAudio.volume = playerVolume.value / 100;
+});
+
+// Mute/Unmute click on icon
+document.getElementById('player-volume-btn').addEventListener('click', () => {
+  if (hiddenAudio.volume > 0) {
+    hiddenAudio.volume = 0;
+    playerVolume.value = 0;
+  } else {
+    hiddenAudio.volume = 0.8;
+    playerVolume.value = 80;
+  }
+});
+
+// Reset play states when audio ends
+hiddenAudio.addEventListener('ended', () => {
+  playIcon.style.display = 'block';
+  pauseIcon.style.display = 'none';
+  playerProgress.value = 0;
+  playerCurrentTime.textContent = '0:00';
 });
