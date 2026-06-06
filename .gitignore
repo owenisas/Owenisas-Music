@@ -38,3 +38,8 @@ backend/node.tar.xz
 backend/yt-dlp
 
 node-v20.11.1-linux-x64.tar.xz
+
+# Build / debug artifacts & server output (never commit credentials or logs)
+build_log.txt
+backend/output.txt
+*.log

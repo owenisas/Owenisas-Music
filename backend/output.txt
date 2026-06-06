@@ -1,4 +1,0 @@
-  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
-                                 Dload  Upload   Total   Spent    Left  Speed
-  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100    36  100    36    0     0   1584      0 --:--:-- --:--:-- --:--:--  1636
-{"error":"Playlist fetch failed: "}
