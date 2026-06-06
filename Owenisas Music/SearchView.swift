@@ -11,6 +11,34 @@ struct SearchView: View {
     @State private var isSearching = false
     @FocusState private var searchFocused: Bool
 
+    // Recent searches (persisted, newline-delimited, most-recent first)
+    @AppStorage("recentSearchHistory") private var recentSearchHistoryRaw = ""
+    private let maxRecentSearches = 8
+
+    private var recentSearches: [String] {
+        recentSearchHistoryRaw
+            .components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+    }
+
+    private func addRecentSearch(_ term: String) {
+        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var items = recentSearches.filter { $0.localizedCaseInsensitiveCompare(trimmed) != .orderedSame }
+        items.insert(trimmed, at: 0)
+        recentSearchHistoryRaw = items.prefix(maxRecentSearches).joined(separator: "\n")
+    }
+
+    private func removeRecentSearch(_ term: String) {
+        recentSearchHistoryRaw = recentSearches
+            .filter { $0 != term }
+            .joined(separator: "\n")
+    }
+
+    private func clearRecentSearches() {
+        recentSearchHistoryRaw = ""
+    }
+
     private var filteredSongs: [SongData] {
         guard !searchText.isEmpty else { return [] }
         return allSongs.filter {
@@ -72,6 +100,8 @@ struct SearchView: View {
                     .focused($searchFocused)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
+                    .submitLabel(.search)
+                    .onSubmit { addRecentSearch(searchText) }
                     .onTapGesture {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             isSearching = true
@@ -110,9 +140,60 @@ struct SearchView: View {
         .padding(.bottom, 16)
     }
 
+    // MARK: - Recent Searches
+    @ViewBuilder
+    private var recentSearchesSection: some View {
+        if !recentSearches.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Recent Searches")
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                    Spacer()
+                    Button("Clear") {
+                        withAnimation { clearRecentSearches() }
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.green)
+                }
+                .padding(.horizontal, 16)
+
+                ForEach(recentSearches, id: \.self) { term in
+                    HStack(spacing: 12) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 15))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 24)
+                        Text(term)
+                            .font(.system(size: 15))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Spacer()
+                        Button {
+                            withAnimation { removeRecentSearch(term) }
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        searchText = term
+                        searchFocused = true
+                        withAnimation(.easeInOut(duration: 0.2)) { isSearching = true }
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Browse Content (when not searching)
     private var browseContent: some View {
         VStack(alignment: .leading, spacing: 24) {
+            recentSearchesSection
+
             Text("Browse")
                 .font(.system(size: 24, weight: .bold, design: .rounded))
                 .padding(.horizontal, 16)
@@ -269,6 +350,7 @@ struct SearchView: View {
                                 .padding(.horizontal, 16)
                                 .contentShape(Rectangle())
                                 .onTapGesture {
+                                    addRecentSearch(searchText)
                                     player.play(song: song, in: dataManager.toSongs(filteredSongs))
                                 }
                         }

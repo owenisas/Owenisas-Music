@@ -397,6 +397,15 @@ struct NowPlayingView: View {
     // MARK: - Bottom Controls
     @State private var showSleepTimer = false
 
+    private var speedLabel: String {
+        let rate = player.playbackRate
+        // Trim trailing zeros: 1.0 -> "1×", 1.25 -> "1.25×", 1.5 -> "1.5×"
+        let trimmed = rate.truncatingRemainder(dividingBy: 1) == 0
+            ? String(Int(rate))
+            : String(rate).replacingOccurrences(of: "0+$", with: "", options: .regularExpression)
+        return "\(trimmed)×"
+    }
+
     private var bottomControls: some View {
         HStack {
             Button { player.toggleShuffle() } label: {
@@ -423,6 +432,16 @@ struct NowPlayingView: View {
                     .foregroundStyle(player.repeatMode.isActive ? .green : .white.opacity(0.4))
                     .frame(width: 32, height: 32)
             }
+
+            Spacer()
+
+            Button { player.cyclePlaybackRate() } label: {
+                Text(speedLabel)
+                    .font(.system(size: 13, weight: .heavy, design: .rounded))
+                    .foregroundStyle(player.playbackRate == 1.0 ? .white.opacity(0.4) : .green)
+                    .frame(width: 36, height: 32)
+            }
+            .accessibilityLabel("Playback speed \(speedLabel)")
 
             Spacer()
 

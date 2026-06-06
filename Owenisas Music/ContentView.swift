@@ -17,6 +17,36 @@ struct ContentView: View {
             .sorted { ($0.lastPlayedDate ?? .distantPast) > ($1.lastPlayedDate ?? .distantPast) }
     }
 
+    // MARK: - "Made For You" mixes
+    private var hasEnoughForMixes: Bool { allSongs.count >= 4 }
+
+    /// Most-played songs first.
+    private var onRepeatMix: [SongData] {
+        allSongs.filter { $0.playCount > 0 }.sorted { $0.playCount > $1.playCount }
+    }
+
+    /// A blend of liked, most-played, and the rest of the library (deduped).
+    private var dailyMix: [SongData] {
+        var seen = Set<String>()
+        var result: [SongData] = []
+        for song in allSongs.filter({ $0.isFavorited }) + onRepeatMix + allSongs {
+            if seen.insert(song.id).inserted { result.append(song) }
+        }
+        return Array(result.prefix(50))
+    }
+
+    /// Songs you've played the least — surface forgotten tracks.
+    private var discoverMix: [SongData] {
+        allSongs.sorted { $0.playCount < $1.playCount }
+    }
+
+    private func playMix(_ songs: [SongData]) {
+        let pool = dataManager.toSongs(songs)
+        guard let first = pool.randomElement() else { return }
+        player.isShuffled = true
+        player.play(song: first, in: pool)
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
@@ -26,6 +56,12 @@ struct ContentView: View {
                 if !recentlyPlayed.isEmpty {
                     sectionHeader("Recently Played", icon: "clock.arrow.circlepath")
                     recentlyPlayedCarousel
+                }
+
+                // Made For You
+                if hasEnoughForMixes {
+                    sectionHeader("Made For You", icon: "sparkles")
+                    madeForYouSection
                 }
 
                 // Recently Added
@@ -108,6 +144,74 @@ struct ContentView: View {
             Text(title)
                 .font(.system(size: 18, weight: .bold, design: .rounded))
         }
+    }
+
+    // MARK: - Made For You
+    private var madeForYouSection: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 14) {
+                mixCard(
+                    title: "Daily Mix",
+                    subtitle: "A blend just for you",
+                    icon: "infinity",
+                    gradient: [.green, .teal],
+                    songs: dailyMix
+                )
+
+                if !onRepeatMix.isEmpty {
+                    mixCard(
+                        title: "On Repeat",
+                        subtitle: "Your most played",
+                        icon: "repeat",
+                        gradient: [.purple, .indigo],
+                        songs: onRepeatMix
+                    )
+                }
+
+                mixCard(
+                    title: "Discover",
+                    subtitle: "Rediscover your library",
+                    icon: "safari",
+                    gradient: [.orange, .pink],
+                    songs: discoverMix
+                )
+            }
+        }
+    }
+
+    private func mixCard(title: String, subtitle: String, icon: String, gradient: [Color], songs: [SongData]) -> some View {
+        Button {
+            playMix(songs)
+        } label: {
+            VStack(alignment: .leading, spacing: 0) {
+                Image(systemName: icon)
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+                Text(title)
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Text(subtitle)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(1)
+            }
+            .padding(14)
+            .frame(width: 150, height: 150, alignment: .leading)
+            .background(
+                LinearGradient(colors: gradient, startPoint: .topLeading, endPoint: .bottomTrailing),
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
+            .overlay(alignment: .topTrailing) {
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 26))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .padding(10)
+            }
+            .shadow(color: .black.opacity(0.15), radius: 6, y: 4)
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Recently Played

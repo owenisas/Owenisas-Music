@@ -36,6 +36,21 @@ struct SettingsView: View {
                             .tint(.green)
                     }
                 }
+
+                // Playback speed
+                Picker(selection: $player.playbackRate) {
+                    ForEach(MusicPlayerManager.playbackRatePresets, id: \.self) { rate in
+                        Text(Self.formatRate(rate)).tag(rate)
+                    }
+                } label: {
+                    Label {
+                        Text("Playback Speed")
+                    } icon: {
+                        Image(systemName: "gauge.with.dots.needle.67percent")
+                            .foregroundStyle(.green)
+                    }
+                }
+                .tint(.green)
             } header: {
                 Text("Playback")
             }
@@ -82,6 +97,22 @@ struct SettingsView: View {
                 }
             } header: {
                 Text("Sleep Timer")
+            }
+
+            // Your Activity
+            Section {
+                NavigationLink {
+                    StatsView()
+                } label: {
+                    Label {
+                        Text("Your Stats")
+                    } icon: {
+                        Image(systemName: "chart.bar.fill")
+                            .foregroundStyle(.green)
+                    }
+                }
+            } header: {
+                Text("Your Activity")
             }
 
             // Audio Section
@@ -209,6 +240,13 @@ struct SettingsView: View {
     }
 
     // MARK: - Helpers
+    static func formatRate(_ rate: Float) -> String {
+        let trimmed = rate.truncatingRemainder(dividingBy: 1) == 0
+            ? String(Int(rate))
+            : String(rate).replacingOccurrences(of: "0+$", with: "", options: .regularExpression)
+        return "\(trimmed)×"
+    }
+
     private var storageUsed: String {
         let fm = FileManager.default
         guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return "—" }

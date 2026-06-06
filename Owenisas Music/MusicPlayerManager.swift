@@ -38,6 +38,17 @@ class MusicPlayerManager: NSObject, ObservableObject {
     @Published var crossfadeEnabled = true
     @Published var crossfadeDuration: TimeInterval = 3.0
 
+    /// Playback speed (0.5x – 2.0x). Persisted across launches.
+    @Published var playbackRate: Float = UserDefaults.standard.object(forKey: "playbackRate") as? Float ?? 1.0 {
+        didSet {
+            UserDefaults.standard.set(playbackRate, forKey: "playbackRate")
+            applyPlaybackRate()
+        }
+    }
+
+    /// Available speed presets surfaced in the UI.
+    static let playbackRatePresets: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+
     // MARK: – Sleep Timer
     @Published var sleepTimerActive = false
     @Published var sleepTimerEndDate: Date?
@@ -218,9 +229,28 @@ class MusicPlayerManager: NSObject, ObservableObject {
     // MARK: - Playback
     func resume() {
         player?.play()
+        player?.rate = playbackRate
         isPlaying = true
         startTimer()
         updateNowPlayingInfo()
+    }
+
+    // MARK: - Playback Speed
+    /// Apply the current speed to whichever player is active without interrupting playback.
+    private func applyPlaybackRate() {
+        let activePlayer = secondaryPlayer ?? player
+        activePlayer?.enableRate = true
+        if isPlaying {
+            activePlayer?.rate = playbackRate
+        }
+        updateNowPlayingInfo()
+    }
+
+    /// Step to the next speed preset, wrapping back to the start.
+    func cyclePlaybackRate() {
+        let presets = Self.playbackRatePresets
+        let currentIdx = presets.firstIndex(of: playbackRate) ?? presets.firstIndex(of: 1.0) ?? 0
+        playbackRate = presets[(currentIdx + 1) % presets.count]
     }
 
     private func loadAndPlay(_ song: Song, crossfade: Bool = false) {
@@ -247,10 +277,12 @@ class MusicPlayerManager: NSObject, ObservableObject {
 
             player = try Self.makeAudioPlayer(for: song.audioFileURL)
             player?.delegate = self
+            player?.enableRate = true
             player?.prepareToPlay()
             duration = player?.duration ?? 0
             currentTime = 0
             player?.play()
+            player?.rate = playbackRate
             isPlaying = true
             startTimer()
             updateNowPlayingInfo()
@@ -302,10 +334,12 @@ class MusicPlayerManager: NSObject, ObservableObject {
         do {
             secondaryPlayer = try Self.makeAudioPlayer(for: song.audioFileURL)
             secondaryPlayer?.delegate = self
+            secondaryPlayer?.enableRate = true
             secondaryPlayer?.volume = 0
             secondaryPlayer?.prepareToPlay()
             print("[DEBUG] MusicPlayer: Starting crossfade to: \(song.title)")
             secondaryPlayer?.play()
+            secondaryPlayer?.rate = playbackRate
 
             // Crossfade
             oldPlayer.setVolume(0, fadeDuration: crossfadeDuration)
@@ -541,7 +575,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
         guard var info = MPNowPlayingInfoCenter.default().nowPlayingInfo,
               let p = player else { return }
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = p.currentTime
-        info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
+        info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? Double(playbackRate) : 0.0
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
 
@@ -611,7 +645,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
             MPMediaItemPropertyAlbumTitle: song.albumTitle,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: activePlayer?.currentTime ?? currentTime,
             MPMediaItemPropertyPlaybackDuration: activePlayer?.duration ?? duration,
-            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? Double(playbackRate) : 0.0
         ]
         if let path = song.coverImageURL?.path, let image = ImageCache.shared.image(for: path) {
             let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
