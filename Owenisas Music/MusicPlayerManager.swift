@@ -38,6 +38,12 @@ class MusicPlayerManager: NSObject, ObservableObject {
     @Published var crossfadeEnabled = true
     @Published var crossfadeDuration: TimeInterval = 3.0
 
+    // MARK: – Sleep Timer
+    @Published var sleepTimerActive = false
+    @Published var sleepTimerEndDate: Date?
+    @Published var sleepTimerEndOfTrack = false
+    private var sleepTimer: AnyCancellable?
+
     // MARK: – Queue
     /// The original ordered queue (before shuffle)
     private var originalQueue: [Song] = []
@@ -539,6 +545,47 @@ class MusicPlayerManager: NSObject, ObservableObject {
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
 
+    // MARK: - Sleep Timer
+    func setSleepTimer(minutes: Int) {
+        cancelSleepTimer()
+        sleepTimerEndOfTrack = false
+        sleepTimerActive = true
+        sleepTimerEndDate = Date().addingTimeInterval(TimeInterval(minutes * 60))
+        sleepTimer = Timer.publish(every: 1, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self = self, let endDate = self.sleepTimerEndDate else { return }
+                if Date() >= endDate {
+                    self.pause()
+                    self.cancelSleepTimer()
+                }
+            }
+    }
+
+    func setSleepTimerEndOfTrack() {
+        cancelSleepTimer()
+        sleepTimerEndOfTrack = true
+        sleepTimerActive = true
+        sleepTimerEndDate = nil
+    }
+
+    func cancelSleepTimer() {
+        sleepTimer?.cancel()
+        sleepTimer = nil
+        sleepTimerActive = false
+        sleepTimerEndDate = nil
+        sleepTimerEndOfTrack = false
+    }
+
+    var sleepTimerRemainingFormatted: String {
+        if sleepTimerEndOfTrack { return "End of track" }
+        guard let endDate = sleepTimerEndDate else { return "Off" }
+        let remaining = max(endDate.timeIntervalSinceNow, 0)
+        let mins = Int(remaining) / 60
+        let secs = Int(remaining) % 60
+        return String(format: "%d:%02d", mins, secs)
+    }
+
     // MARK: - Format helpers
     static func formatTime(_ time: TimeInterval) -> String {
         guard !time.isNaN && !time.isInfinite else { return "0:00" }
@@ -614,17 +661,25 @@ extension MusicPlayerManager: AVAudioPlayerDelegate {
     func audioPlayerDidFinishPlaying(_ finishedPlayer: AVAudioPlayer, successfully flag: Bool) {
         // If this was the secondary player from a crossfade, ignore
         if finishedPlayer == secondaryPlayer { return }
-        
+
         // If crossfade already advanced to a new song via autoAdvance,
         // ignore the old player's natural finish to prevent double-skip.
         // Check: if the current player is NOT the one that finished, someone else took over.
         if finishedPlayer !== player { return }
-        
+
         // If we crossfaded, ignore natural ending of old player
         guard secondaryPlayer == nil else { return }
-        
+
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+
+            // Sleep timer: end of track mode
+            if self.sleepTimerEndOfTrack {
+                self.pause()
+                self.cancelSleepTimer()
+                return
+            }
+
             switch self.repeatMode {
             case .one:
                 if let song = self.currentSong {

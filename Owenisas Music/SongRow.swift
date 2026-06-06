@@ -30,7 +30,16 @@ struct SongRow: View {
             }
 
             if showAlbumArt {
-                CachedCoverImage(song.coverImageURL, size: 48, cornerRadius: 8)
+                ZStack {
+                    CachedCoverImage(song.coverImageURL, size: 48, cornerRadius: 8)
+                    if isCurrentlyPlaying && playerManager.isPlaying {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(.black.opacity(0.3))
+                            .frame(width: 48, height: 48)
+                        NowPlayingBars()
+                            .frame(width: 18, height: 14)
+                    }
+                }
             }
 
             VStack(alignment: .leading, spacing: 3) {
@@ -39,7 +48,7 @@ struct SongRow: View {
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(isCurrentlyPlaying ? .green : .primary)
                         .lineLimit(1)
-                    
+
                     if song.isFavorited {
                         Image(systemName: "heart.fill")
                             .font(.system(size: 10))
@@ -54,11 +63,6 @@ struct SongRow: View {
             }
 
             Spacer()
-
-            if isCurrentlyPlaying && playerManager.isPlaying {
-                NowPlayingBars()
-                    .frame(width: 20, height: 16)
-            }
 
             Menu {
                 Button {

@@ -272,6 +272,14 @@ struct NowPlayingView: View {
                     .foregroundStyle(player.currentSong?.isFavorited == true ? .pink : .white.opacity(0.5))
                     .scaleEffect(player.currentSong?.isFavorited == true ? 1.1 : 1.0)
             }
+
+            if let song = player.currentSong {
+                ShareLink(item: song.title + " - " + song.artist) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+            }
         }
     }
 
@@ -337,7 +345,10 @@ struct NowPlayingView: View {
         HStack(spacing: 0) {
             Spacer()
 
-            Button { player.previous() } label: {
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                player.previous()
+            } label: {
                 Image(systemName: "backward.fill")
                     .font(.system(size: 28))
                     .foregroundStyle(.white)
@@ -347,14 +358,14 @@ struct NowPlayingView: View {
             Spacer()
 
             Button {
-                let impact = UIImpactFeedbackGenerator(style: .medium)
-                impact.impactOccurred()
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 player.togglePlayPause()
             } label: {
                 ZStack {
                     Circle()
                         .fill(.white)
-                        .frame(width: 64, height: 64)
+                        .frame(width: 66, height: 66)
+                        .shadow(color: .white.opacity(0.2), radius: 12)
 
                     Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 26, weight: .bold))
@@ -362,12 +373,17 @@ struct NowPlayingView: View {
                         .offset(x: player.isPlaying ? 0 : 2)
                 }
             }
+            .scaleEffect(player.isPlaying ? 1.0 : 0.96)
+            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: player.isPlaying)
             .accessibilityIdentifier("nowPlayingPlayPause")
             .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
 
             Spacer()
 
-            Button { player.next() } label: {
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                player.next()
+            } label: {
                 Image(systemName: "forward.fill")
                     .font(.system(size: 28))
                     .foregroundStyle(.white)
@@ -379,6 +395,8 @@ struct NowPlayingView: View {
     }
 
     // MARK: - Bottom Controls
+    @State private var showSleepTimer = false
+
     private var bottomControls: some View {
         HStack {
             Button { player.toggleShuffle() } label: {
@@ -404,6 +422,20 @@ struct NowPlayingView: View {
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(player.repeatMode.isActive ? .green : .white.opacity(0.4))
                     .frame(width: 32, height: 32)
+            }
+
+            Spacer()
+
+            Button { showSleepTimer = true } label: {
+                Image(systemName: player.sleepTimerActive ? "moon.fill" : "moon")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(player.sleepTimerActive ? .indigo : .white.opacity(0.4))
+                    .frame(width: 32, height: 32)
+            }
+            .sheet(isPresented: $showSleepTimer) {
+                SleepTimerSheetView()
+                    .presentationDetents([.medium])
+                    .presentationDragIndicator(.visible)
             }
         }
     }

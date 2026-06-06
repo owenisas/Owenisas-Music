@@ -15,8 +15,9 @@ final class SongData {
     var duration: TimeInterval
     var trackNumber: Int
     var dateAdded: Date
-    var lastPlayedDate: Date?                     // Track listening history
-    var isFavorited: Bool = false                // Liked songs
+    var lastPlayedDate: Date?
+    var playCount: Int = 0
+    var isFavorited: Bool = false
 
     @Relationship(inverse: \PlaylistData.songs)
     var playlists: [PlaylistData] = []
@@ -36,6 +37,7 @@ final class SongData {
         trackNumber: Int = 0,
         dateAdded: Date = .now,
         lastPlayedDate: Date? = nil,
+        playCount: Int = 0,
         isFavorited: Bool = false
     ) {
         self.id = id
@@ -49,6 +51,7 @@ final class SongData {
         self.trackNumber = trackNumber
         self.dateAdded = dateAdded
         self.lastPlayedDate = lastPlayedDate
+        self.playCount = playCount
         self.isFavorited = isFavorited
     }
 

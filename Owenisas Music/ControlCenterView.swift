@@ -13,7 +13,7 @@ struct MiniPlayerView: View {
                         Rectangle()
                             .fill(.white.opacity(0.08))
                         Rectangle()
-                            .fill(.white.opacity(0.6))
+                            .fill(LinearGradient(colors: [.green, .green.opacity(0.7)], startPoint: .leading, endPoint: .trailing))
                             .frame(width: geo.size.width * progressFraction)
                             .animation(.linear(duration: 0.25), value: progressFraction)
                     }
@@ -23,12 +23,15 @@ struct MiniPlayerView: View {
                 HStack(spacing: 12) {
                     CachedCoverImage(song.coverImageURL, size: 46, cornerRadius: 8)
                         .shadow(color: .white.opacity(0.08), radius: 8)
+                        .id(song.id)
+                        .transition(.scale.combined(with: .opacity))
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(song.title)
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(.white)
                             .lineLimit(1)
+                            .id("title-\(song.id)")
 
                         Text(song.artist)
                             .font(.system(size: 12))
@@ -37,6 +40,19 @@ struct MiniPlayerView: View {
                     }
 
                     Spacer()
+
+                    // Favorite button
+                    Button {
+                        let impact = UIImpactFeedbackGenerator(style: .light)
+                        impact.impactOccurred()
+                        player.toggleFavorite()
+                    } label: {
+                        Image(systemName: song.isFavorited ? "heart.fill" : "heart")
+                            .font(.system(size: 14))
+                            .foregroundStyle(song.isFavorited ? .pink : .white.opacity(0.4))
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
 
                     Button {
                         let impact = UIImpactFeedbackGenerator(style: .light)
@@ -53,7 +69,11 @@ struct MiniPlayerView: View {
                     .accessibilityIdentifier("miniPlayerPlayPause")
                     .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
 
-                    Button { player.next() } label: {
+                    Button {
+                        let impact = UIImpactFeedbackGenerator(style: .light)
+                        impact.impactOccurred()
+                        player.next()
+                    } label: {
                         Image(systemName: "forward.fill")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.6))
@@ -64,6 +84,7 @@ struct MiniPlayerView: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
             }
+            .animation(.spring(response: 0.4, dampingFraction: 0.8), value: song.id)
             .background(miniPlayerBackground(song: song))
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .shadow(color: .black.opacity(0.35), radius: 10, x: 0, y: 5)
@@ -72,6 +93,14 @@ struct MiniPlayerView: View {
             .onTapGesture {
                 player.showFullPlayer = true
             }
+            .gesture(
+                DragGesture(minimumDistance: 10)
+                    .onEnded { value in
+                        if value.translation.height < -30 {
+                            player.showFullPlayer = true
+                        }
+                    }
+            )
             .onReceive(Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()) { _ in
                 if UIApplication.shared.applicationState == .active {
                     localCurrentTime = player.currentTime

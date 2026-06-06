@@ -48,6 +48,7 @@ class DataManager: ObservableObject {
         let descriptor = FetchDescriptor<SongData>(predicate: #Predicate { $0.id == songId })
         if let song = (try? ctx.fetch(descriptor))?.first {
             song.lastPlayedDate = .now
+            song.playCount += 1
             try? ctx.save()
         }
     }

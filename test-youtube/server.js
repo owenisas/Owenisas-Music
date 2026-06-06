@@ -11,14 +11,50 @@ if (typeof dns.setDefaultResultOrder === 'function') {
   dns.setDefaultResultOrder('ipv4first');
 }
 
-// Cookie Loader and Parser
+// Robust Cookie Loader and Parser
+function parseCookieString(content) {
+  if (!content) return null;
+  
+  // If it's a Netscape format string (has tabs or starts with #)
+  if (content.includes('\t') || content.includes('# Netscape')) {
+    const cookieArray = [];
+    const lines = content.split(/\r?\n/);
+    for (let line of lines) {
+      line = line.trim();
+      if (!line || line.startsWith('#')) continue;
+      const parts = line.split('\t');
+      if (parts.length >= 7) {
+        const name = parts[5];
+        const value = parts[6];
+        cookieArray.push(`${name}=${value}`);
+      }
+    }
+    if (cookieArray.length > 0) {
+      return cookieArray.join('; ');
+    }
+  }
+  
+  // Otherwise, assume it's already a raw semicolon-separated cookie header string
+  const clean = content.replace(/\r?\n/g, ' ').trim();
+  if (clean.includes('=')) {
+    return clean;
+  }
+  
+  return null;
+}
+
 function loadCookies() {
-  // 1. Try environment variable first (raw cookie string)
+  // 1. Try environment variable first
   if (process.env.YT_COOKIE) {
-    return process.env.YT_COOKIE;
+    const parsed = parseCookieString(process.env.YT_COOKIE);
+    if (parsed) {
+      console.log(`[Cookies] Successfully loaded and parsed YT_COOKIE environment variable (length: ${parsed.length})`);
+      return parsed;
+    }
+    console.warn(`[Cookies Warning] YT_COOKIE environment variable is set but could not be parsed.`);
   }
 
-  // 2. Try looking for Netscape cookies.txt file in the workspace
+  // 2. Try looking for cookie files in the workspace
   const cookiePaths = [
     path.join(__dirname, 'youtube_cookies.txt'),
     path.join(__dirname, 'www.youtube.com_cookies.txt'),
@@ -30,31 +66,18 @@ function loadCookies() {
     if (fs.existsSync(p)) {
       try {
         const content = fs.readFileSync(p, 'utf8');
-        const cookieArray = [];
-        const lines = content.split('\n');
-        
-        for (let line of lines) {
-          line = line.trim();
-          if (!line || line.startsWith('#')) continue;
-          
-          const parts = line.split('\t');
-          if (parts.length >= 7) {
-            const name = parts[5];
-            const value = parts[6];
-            cookieArray.push(`${name}=${value}`);
-          }
-        }
-        
-        if (cookieArray.length > 0) {
-          console.log(`[Cookies] Loaded ${cookieArray.length} cookies from file: ${path.basename(p)}`);
-          return cookieArray.join('; ');
+        const parsed = parseCookieString(content);
+        if (parsed) {
+          console.log(`[Cookies] Loaded cookies from file: ${path.basename(p)} (length: ${parsed.length})`);
+          return parsed;
         }
       } catch (err) {
-        console.error(`[Cookies Error] Failed reading cookie file: ${err.message}`);
+        console.error(`[Cookies Error] Failed reading cookie file ${path.basename(p)}: ${err.message}`);
       }
     }
   }
 
+  console.warn(`[Cookies Warning] No valid cookies found in YT_COOKIE or cookie files.`);
   return null;
 }
 
@@ -247,7 +270,7 @@ const server = http.createServer(async (req, res) => {
       
       const headers = {
         'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
-        'Accept': '*/*',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
       };
 

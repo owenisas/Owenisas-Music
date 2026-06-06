@@ -11,10 +11,22 @@ struct ContentView: View {
     @State private var songToDelete: SongData?
     @State private var showDeleteConfirmation = false
 
+    private var recentlyPlayed: [SongData] {
+        allSongs
+            .filter { $0.lastPlayedDate != nil }
+            .sorted { ($0.lastPlayedDate ?? .distantPast) > ($1.lastPlayedDate ?? .distantPast) }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 greetingHeader
+
+                // Recently Played
+                if !recentlyPlayed.isEmpty {
+                    sectionHeader("Recently Played", icon: "clock.arrow.circlepath")
+                    recentlyPlayedCarousel
+                }
 
                 // Recently Added
                 if !allSongs.isEmpty {
@@ -37,6 +49,17 @@ struct ContentView: View {
             .padding(.horizontal, 16)
         }
         .background(Color(UIColor.systemBackground))
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                NavigationLink {
+                    SettingsView()
+                } label: {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
         .sheet(item: $songToAddToPlaylist) { songData in
             AddToPlaylistView(song: songData)
         }
@@ -50,15 +73,18 @@ struct ContentView: View {
 
     // MARK: - Greeting
     private var greetingHeader: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(greeting)
-                .font(.system(size: 28, weight: .bold, design: .rounded))
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(greeting)
+                    .font(.system(size: 26, weight: .bold, design: .rounded))
 
-            if !allSongs.isEmpty {
-                Text("\(allSongs.count) songs in your library")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.secondary)
+                if !allSongs.isEmpty {
+                    Text("\(allSongs.count) songs in your library")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
             }
+            Spacer()
         }
         .padding(.top, 16)
     }
@@ -81,6 +107,54 @@ struct ContentView: View {
                 .foregroundStyle(.green)
             Text(title)
                 .font(.system(size: 18, weight: .bold, design: .rounded))
+        }
+    }
+
+    // MARK: - Recently Played
+    private var recentlyPlayedCarousel: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 14) {
+                ForEach(Array(recentlyPlayed.prefix(8).enumerated()), id: \.offset) { _, songData in
+                    let song = Song.from(songData)
+                    Button {
+                        player.play(song: song, in: dataManager.toSongs(recentlyPlayed))
+                    } label: {
+                        HStack(spacing: 10) {
+                            CachedCoverImage(song.coverImageURL, size: 48, cornerRadius: 6)
+
+                            Text(songData.title)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(2)
+
+                            Spacer()
+                        }
+                        .frame(width: 180)
+                        .padding(8)
+                        .background(Color(UIColor.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button {
+                            player.toggleFavorite(for: songData.id)
+                        } label: {
+                            Label(songData.isFavorited ? "Unlike" : "Like", systemImage: songData.isFavorited ? "heart.slash" : "heart")
+                        }
+
+                        Button {
+                            player.playNext(Song.from(songData))
+                        } label: {
+                            Label("Play Next", systemImage: "text.insert")
+                        }
+
+                        Button {
+                            player.addToQueue(Song.from(songData))
+                        } label: {
+                            Label("Add to Queue", systemImage: "text.append")
+                        }
+                    }
+                }
+            }
         }
     }
 

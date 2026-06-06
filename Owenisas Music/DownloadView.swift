@@ -456,15 +456,44 @@ struct DownloadView: View {
                 return
             }
 
-            if let playerData = self.extractYouTubeJSON(from: html, marker: "ytInitialPlayerResponse = ")
+            let watchPagePlayerData = self.extractYouTubeJSON(from: html, marker: "ytInitialPlayerResponse = ")
                 ?? self.extractYouTubeJSON(from: html, marker: "ytInitialPlayerResponse={")
-                ?? self.extractYouTubeJSON(from: html, marker: "window[\"ytInitialPlayerResponse\"] = "),
+                ?? self.extractYouTubeJSON(from: html, marker: "window[\"ytInitialPlayerResponse\"] = ")
+
+            if let playerData = watchPagePlayerData,
                let meta = self.videoInfo(from: playerData, videoId: videoId) {
                 self.debugLog("Watch page metadata parsed for \(videoId) from ytInitialPlayerResponse")
                 completion(.success(meta))
                 return
             }
+
+            // Extract captions from the watch page even though audio parsing failed.
+            // Innertube mobile clients (IOS, ANDROID_VR) often omit captions data,
+            // so we carry these forward and merge them into the Innertube result.
+            let watchPageSubtitles = watchPagePlayerData.map { self.extractSubtitleUrls(from: $0) } ?? [:]
+            if !watchPageSubtitles.isEmpty {
+                self.debugLog("Extracted \(watchPageSubtitles.count) subtitle tracks from watch page for \(videoId) (audio parse failed, will merge into Innertube result)")
+            }
+
             self.debugLog("Watch page ytInitialPlayerResponse parse failed for \(videoId), attempting Innertube fallback")
+
+            let mergeSubtitles = { (meta: VideoInfo) -> VideoInfo in
+                guard !watchPageSubtitles.isEmpty else { return meta }
+                let existing = meta.subtitleUrls ?? [:]
+                if !existing.isEmpty { return meta }
+                self.debugLog("Merging \(watchPageSubtitles.count) watch page subtitle tracks into Innertube result for \(videoId)")
+                return VideoInfo(
+                    id: meta.id,
+                    title: meta.title,
+                    artist: meta.artist,
+                    album: meta.album,
+                    duration: meta.duration,
+                    language: meta.language,
+                    audioUrl: meta.audioUrl,
+                    coverUrl: meta.coverUrl,
+                    subtitleUrls: watchPageSubtitles
+                )
+            }
 
             guard let apiKey = self.extractInnertubeAPIKey(from: html) else {
                 completion(.failure(DownloadError(message: "Could not extract YouTube API key from page.")))
@@ -473,7 +502,7 @@ struct DownloadView: View {
 
             let context = self.extractInnertubeContext(from: html)
             let signatureTimestamp = self.extractInnertubeSignatureTimestamp(from: html)
-            
+
             if let signatureTimestamp {
                 let androidVRContext = self.buildAndroidVRClientContext(from: context)
                 let fallbackAttempts: [(name: String, context: [String: Any]?, signatureTimestamp: Int?, includeParams: Bool)] = [
@@ -506,7 +535,7 @@ struct DownloadView: View {
                     ) { result in
                         switch result {
                         case .success(let metadata):
-                            completion(.success(metadata))
+                            completion(.success(mergeSubtitles(metadata)))
                         case .failure(let error):
                             self.debugLog("INNERTUBE path \(attempt.name) failed for \(videoId): \(error.message)")
                             tryAttempt(index + 1)
@@ -522,9 +551,15 @@ struct DownloadView: View {
                 videoId: videoId,
                 apiKey: apiKey,
                 context: context,
-                token: token,
-                completion: completion
-            )
+                token: token
+            ) { result in
+                switch result {
+                case .success(let metadata):
+                    completion(.success(mergeSubtitles(metadata)))
+                case .failure:
+                    completion(result)
+                }
+            }
         }.resume()
     }
 
@@ -771,6 +806,25 @@ struct DownloadView: View {
         return result.isEmpty ? nil : result
     }
 
+    private func extractSubtitleUrls(from player: [String: Any]) -> [String: String] {
+        var subtitleUrls: [String: String] = [:]
+        guard let captions = player["captions"] as? [String: Any] else { return subtitleUrls }
+        let trackList = (captions["playerCaptionsTracklistRenderer"] as? [String: Any])?["captionTracks"] as? [[String: Any]]
+        for track in trackList ?? [] {
+            guard let base = track["baseUrl"] as? String, !base.isEmpty else { continue }
+            let lang = (track["languageCode"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? (track["vssId"] as? String)?
+                .replacingOccurrences(of: ".vtt", with: "")
+                .replacingOccurrences(of: ".srt", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let urlWithVTT = base.contains("fmt=") ? base : "\(base)&fmt=vtt"
+            let subtitleLang = (lang ?? "unknown").isEmpty ? "unknown" : (lang ?? "unknown")
+            subtitleUrls[subtitleLang] = urlWithVTT
+        }
+        return subtitleUrls
+    }
+
     private func videoInfo(from player: [String: Any], videoId: String) -> VideoInfo? {
         guard let videoDetails = player["videoDetails"] as? [String: Any] else {
             return nil
@@ -798,24 +852,7 @@ struct DownloadView: View {
             return nil
         }
 
-        var subtitleUrls: [String: String] = [:]
-        if let captions = player["captions"] as? [String: Any] {
-            let trackList = (captions["playerCaptionsTracklistRenderer"] as? [String: Any])?["captionTracks"] as? [[String: Any]]
-            for track in trackList ?? [] {
-                guard let base = track["baseUrl"] as? String else { continue }
-                let lang = (track["languageCode"] as? String)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    ?? (track["vssId"] as? String)?
-                    .replacingOccurrences(of: ".vtt", with: "")
-                    .replacingOccurrences(of: ".srt", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if !base.isEmpty {
-                    let urlWithVTT = base.contains("fmt=") ? base : "\(base)&fmt=vtt"
-                    let subtitleLang = (lang ?? "unknown").isEmpty ? "unknown" : (lang ?? "unknown")
-                    subtitleUrls[subtitleLang] = urlWithVTT
-                }
-            }
-        }
+        let subtitleUrls = extractSubtitleUrls(from: player)
 
         return VideoInfo(
             id: videoId,

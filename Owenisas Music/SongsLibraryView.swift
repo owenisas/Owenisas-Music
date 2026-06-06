@@ -186,6 +186,29 @@ struct SongsLibraryView: View {
                         player.play(song: song, in: allAsSongs)
                     }
                 }
+                .swipeActions(edge: .leading) {
+                    Button {
+                        player.toggleFavorite(for: songData.id)
+                    } label: {
+                        Image(systemName: songData.isFavorited ? "heart.slash.fill" : "heart.fill")
+                    }
+                    .tint(.pink)
+                }
+                .swipeActions(edge: .trailing) {
+                    Button(role: .destructive) {
+                        songToDelete = songData
+                        showDeleteConfirmation = true
+                    } label: {
+                        Image(systemName: "trash.fill")
+                    }
+
+                    Button {
+                        player.addToQueue(Song.from(songData))
+                    } label: {
+                        Image(systemName: "text.append")
+                    }
+                    .tint(.blue)
+                }
                 .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
                 .tag(songData.id)
             }

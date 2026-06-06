@@ -32,10 +32,18 @@ struct Owenisas_MusicApp: App {
                 }
 
                 NavigationStack {
+                    SearchView()
+                }
+                .tabItem {
+                    Image(systemName: "magnifyingglass")
+                    Text("Search")
+                }
+
+                NavigationStack {
                     SongsLibraryView()
                 }
                 .tabItem {
-                    Image(systemName: "music.note.list")
+                    Image(systemName: "books.vertical.fill")
                     Text("Library")
                 }
 
@@ -74,9 +82,10 @@ struct Owenisas_MusicApp: App {
     }
 
     private func setupAppearance() {
-        // Modern translucent tab bar
+        // Spotify-style dark tab bar
         let tabBarAppearance = UITabBarAppearance()
         tabBarAppearance.configureWithDefaultBackground()
+        tabBarAppearance.backgroundColor = UIColor.systemBackground
         UITabBar.appearance().standardAppearance = tabBarAppearance
         UITabBar.appearance().scrollEdgeAppearance = tabBarAppearance
 
@@ -84,13 +93,14 @@ struct Owenisas_MusicApp: App {
         let navAppearance = UINavigationBarAppearance()
         navAppearance.configureWithDefaultBackground()
         navAppearance.largeTitleTextAttributes = [
-            .font: UIFont.systemFont(ofSize: 32, weight: .bold)
+            .font: UIFont.systemFont(ofSize: 30, weight: .bold)
         ]
         navAppearance.titleTextAttributes = [
             .font: UIFont.systemFont(ofSize: 17, weight: .semibold)
         ]
         UINavigationBar.appearance().standardAppearance = navAppearance
         UINavigationBar.appearance().scrollEdgeAppearance = navAppearance
+        UINavigationBar.appearance().tintColor = UIColor.systemGreen
     }
 
     private func createSongsFolderIfNeeded() {
