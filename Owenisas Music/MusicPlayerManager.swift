@@ -204,6 +204,10 @@ class MusicPlayerManager: NSObject, ObservableObject {
 
     func stopAndRemoveFromQueue(songId: String) {
         let removedCurrentSong = currentSong?.id == songId
+        // Capture the position before stop() resets currentIndex to 0, so that
+        // removing the current track advances to the song that shifts into its
+        // slot rather than restarting from the top of the queue.
+        let savedIndex = currentIndex
         if removedCurrentSong {
             stop()
         }
@@ -216,7 +220,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
         }
 
         if removedCurrentSong {
-            currentIndex = min(currentIndex, queue.count - 1)
+            currentIndex = min(savedIndex, queue.count - 1)
             loadAndPlay(queue[currentIndex], crossfade: false)
             return
         }

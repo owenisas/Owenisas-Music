@@ -171,8 +171,11 @@ struct QueueManagementTests {
         let player = MusicPlayerManager()
         player.play(song: songs[0], in: songs)
 
-        // Move s2 right after s3: [s1, s3, s2, s4]
-        player.moveInQueue(from: IndexSet(integer: 1), to: 2)
+        // Move s2 right after s3: [s1, s3, s2, s4].
+        // SwiftUI's move(fromOffsets:toOffset:) interprets the destination in the
+        // pre-removal index space, so moving index 1 *past* index 2 requires
+        // toOffset 3 (toOffset 2 would be a no-op). Cf. movingCurrentUpdatesIndex.
+        player.moveInQueue(from: IndexSet(integer: 1), to: 3)
 
         // A shuffle/off shuffle cycle should keep this manual order.
         player.toggleShuffle()
