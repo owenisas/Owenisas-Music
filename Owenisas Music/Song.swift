@@ -18,6 +18,8 @@ final class SongData {
     var lastPlayedDate: Date?
     var playCount: Int = 0
     var isFavorited: Bool = false
+    /// Saved playback position for resuming long tracks (mixes, sets). 0 = start over.
+    var playbackPosition: TimeInterval = 0
 
     @Relationship(inverse: \PlaylistData.songs)
     var playlists: [PlaylistData] = []
@@ -152,6 +154,7 @@ struct Song: Identifiable, Equatable {
     var coverImageURL: URL?
     var subtitleFileURL: URL?
     var isFavorited: Bool
+    var savedPosition: TimeInterval = 0
 
     static func == (lhs: Song, rhs: Song) -> Bool {
         lhs.id == rhs.id
@@ -237,7 +240,8 @@ struct Song: Identifiable, Equatable {
             audioFileURL: data.audioFileURL,
             coverImageURL: data.coverImageURL,
             subtitleFileURL: data.subtitleFileURL,
-            isFavorited: data.isFavorited
+            isFavorited: data.isFavorited,
+            savedPosition: data.playbackPosition
         )
     }
 }

@@ -115,7 +115,7 @@ struct ContentView: View {
                     .font(.system(size: 26, weight: .bold, design: .rounded))
 
                 if !allSongs.isEmpty {
-                    Text("\(allSongs.count) songs in your library")
+                    Text("\(allSongs.count) song\(allSongs.count == 1 ? "" : "s") in your library")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(.secondary)
                 }

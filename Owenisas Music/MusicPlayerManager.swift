@@ -63,6 +63,13 @@ class MusicPlayerManager: NSObject, ObservableObject {
     @Published var currentIndex: Int = 0
     private var backgroundTicks: Int = 0
 
+    // MARK: – Resume (local-first persistence)
+    /// Tracks at least this long (mixes, sets) remember their position across plays.
+    static let longTrackResumeThreshold: TimeInterval = 600
+    /// Freshest known resume positions, seeded from SongData.playbackPosition.
+    private var resumePositions: [String: TimeInterval] = [:]
+    private var hasRestoredSession = false
+
     /// Public read-only playlist access
     var playlist: [Song] { queue }
 
@@ -79,6 +86,28 @@ class MusicPlayerManager: NSObject, ObservableObject {
         }
         setupRemoteCommandCenter()
         setupInterruptionObserver()
+        setupLifecycleObservers()
+    }
+
+    private func setupLifecycleObservers() {
+        let center = NotificationCenter.default
+        center.addObserver(
+            self,
+            selector: #selector(persistStateSnapshot),
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(persistStateSnapshot),
+            name: UIApplication.willTerminateNotification,
+            object: nil
+        )
+    }
+
+    @objc private func persistStateSnapshot() {
+        saveSession()
+        persistPlaybackPosition()
     }
 
     private func setupInterruptionObserver() {
@@ -145,18 +174,20 @@ class MusicPlayerManager: NSObject, ObservableObject {
                 originalQueue.append(song)
             }
         }
+        saveSession()
     }
-    
+
     func addToQueue(_ song: Song) {
         if queue.isEmpty {
             play(song: song, in: [song])
             return
         }
-        
+
         queue.append(song)
         if !originalQueue.contains(where: { $0.id == song.id }) {
             originalQueue.append(song)
         }
+        saveSession()
     }
 
     func moveInQueue(from source: IndexSet, to destination: Int) {
@@ -167,6 +198,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
         if let current = currentSong, let idx = queue.firstIndex(where: { $0.id == current.id }) {
             currentIndex = idx
         }
+        saveSession()
     }
 
     func removeFromQueue(at offsets: IndexSet) {
@@ -200,6 +232,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
                 }
             }
         }
+        saveSession()
     }
 
     func stopAndRemoveFromQueue(songId: String) {
@@ -216,6 +249,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
 
         guard !queue.isEmpty else {
             currentIndex = 0
+            saveSession()
             return
         }
 
@@ -228,10 +262,17 @@ class MusicPlayerManager: NSObject, ObservableObject {
         if let current = currentSong, let idx = queue.firstIndex(where: { $0.id == current.id }) {
             currentIndex = idx
         }
+        saveSession()
     }
 
     // MARK: - Playback
     func resume() {
+        // After a session restore with a broken/missing file there is no
+        // prepared player — fall back to a fresh load of the current song.
+        if player == nil, let song = currentSong {
+            loadAndPlay(song)
+            return
+        }
         player?.play()
         player?.rate = playbackRate
         isPlaying = true
@@ -263,6 +304,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
             return
         }
 
+        persistPlaybackPosition()
         stopTimer()
         player?.stop()
         print("[DEBUG] MusicPlayer: Loading and playing song: \(song.title) (ID: \(song.id))")
@@ -285,12 +327,16 @@ class MusicPlayerManager: NSObject, ObservableObject {
             player?.prepareToPlay()
             duration = player?.duration ?? 0
             currentTime = 0
+            if let p = player {
+                applyResumePosition(for: song, on: p)
+            }
             player?.play()
             player?.rate = playbackRate
             isPlaying = true
             startTimer()
             updateNowPlayingInfo()
             updateListeningHistory(song)
+            saveSession()
         } catch {
             print("Error playing \(song.title): \(error)")
             NSLog("OWENISAS_PLAYER: load failed for %@ at %@: %@", song.title, song.audioFileURL.path, "\(error)")
@@ -335,25 +381,30 @@ class MusicPlayerManager: NSObject, ObservableObject {
             return
         }
 
+        persistPlaybackPosition()
+
         do {
-            secondaryPlayer = try Self.makeAudioPlayer(for: song.audioFileURL)
-            secondaryPlayer?.delegate = self
-            secondaryPlayer?.enableRate = true
-            secondaryPlayer?.volume = 0
-            secondaryPlayer?.prepareToPlay()
+            let newPlayer = try Self.makeAudioPlayer(for: song.audioFileURL)
+            secondaryPlayer = newPlayer
+            newPlayer.delegate = self
+            newPlayer.enableRate = true
+            newPlayer.volume = 0
+            newPlayer.prepareToPlay()
+            currentSong = song
+            duration = newPlayer.duration
+            currentTime = 0
+            applyResumePosition(for: song, on: newPlayer)
             print("[DEBUG] MusicPlayer: Starting crossfade to: \(song.title)")
-            secondaryPlayer?.play()
-            secondaryPlayer?.rate = playbackRate
+            newPlayer.play()
+            newPlayer.rate = playbackRate
 
             // Crossfade
             oldPlayer.setVolume(0, fadeDuration: crossfadeDuration)
-            secondaryPlayer?.setVolume(1.0, fadeDuration: crossfadeDuration)
+            newPlayer.setVolume(1.0, fadeDuration: crossfadeDuration)
 
-            currentSong = song
-            duration = secondaryPlayer?.duration ?? 0
-            currentTime = 0
             isPlaying = true
             updateListeningHistory(song)
+            saveSession()
 
             // After fade completes, clean up and update NowPlaying with correct elapsed time
             DispatchQueue.main.asyncAfter(deadline: .now() + crossfadeDuration) { [weak self] in
@@ -376,6 +427,101 @@ class MusicPlayerManager: NSObject, ObservableObject {
         // We'll let DataManager handle this via a notification or direct call if we had the context
         // For now, let's assume DataManager listens or we call it
         NotificationCenter.default.post(name: .init("SongPlayed"), object: song.id)
+    }
+
+    // MARK: - Long-track resume
+    /// Long tracks (mixes, sets) pick up where they left off; short songs restart.
+    private func applyResumePosition(for song: Song, on audioPlayer: AVAudioPlayer) {
+        guard audioPlayer.duration >= Self.longTrackResumeThreshold else { return }
+        let saved = resumePositions[song.id] ?? song.savedPosition
+        guard saved > 30, saved < audioPlayer.duration - 30 else { return }
+        audioPlayer.currentTime = saved
+        currentTime = saved
+    }
+
+    /// Persist the current position for long tracks so they can resume later.
+    /// Positions near the end (or short tracks) reset to zero.
+    private func persistPlaybackPosition() {
+        guard let song = currentSong, let p = player else { return }
+        guard p.duration >= Self.longTrackResumeThreshold else { return }
+        let position = (p.duration - p.currentTime) < 30 ? 0 : p.currentTime
+        resumePositions[song.id] = position
+        NotificationCenter.default.post(
+            name: .init("SongPositionChanged"),
+            object: song.id,
+            userInfo: ["position": position]
+        )
+    }
+
+    // MARK: - Session persistence (continue where you left off)
+    private func saveSession() {
+        guard let current = currentSong, !queue.isEmpty else {
+            PlaybackSessionStore.clear()
+            return
+        }
+        let session = PlaybackSession(
+            queueIDs: queue.map(\.id),
+            originalQueueIDs: originalQueue.map(\.id),
+            currentSongID: current.id,
+            position: (secondaryPlayer ?? player)?.currentTime ?? currentTime,
+            isShuffled: isShuffled,
+            repeatModeRaw: repeatMode.rawValue
+        )
+        PlaybackSessionStore.save(session)
+    }
+
+    /// Rebuild the last listening session (queue + paused position) from disk.
+    /// Never auto-plays; the listener resumes with one tap.
+    func restoreSession(songs: [Song]) {
+        restoreSession(PlaybackSessionStore.load(), songs: songs)
+    }
+
+    /// Testable core of session restore — applies a session snapshot directly.
+    func restoreSession(_ storedSession: PlaybackSession?, songs: [Song]) {
+        guard !hasRestoredSession else { return }
+        hasRestoredSession = true
+        guard currentSong == nil, queue.isEmpty else { return }
+        guard let session = storedSession else { return }
+
+        let byID = Dictionary(songs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let restoredQueue = session.queueIDs.compactMap { byID[$0] }
+        guard !restoredQueue.isEmpty else {
+            PlaybackSessionStore.clear()
+            return
+        }
+
+        let restoredOriginal = session.originalQueueIDs.compactMap { byID[$0] }
+        originalQueue = restoredOriginal.isEmpty ? restoredQueue : restoredOriginal
+        queue = restoredQueue
+        isShuffled = session.isShuffled
+        repeatMode = RepeatMode(rawValue: session.repeatModeRaw) ?? .off
+
+        let current = byID[session.currentSongID] ?? restoredQueue[0]
+        currentIndex = queue.firstIndex(where: { $0.id == current.id }) ?? 0
+        let position = byID[session.currentSongID] != nil ? session.position : 0
+        prepareRestored(song: current, at: position)
+    }
+
+    /// Load a song paused at a saved position without counting a play.
+    private func prepareRestored(song: Song, at position: TimeInterval) {
+        currentSong = song
+        isPlaying = false
+        guard let restoredPlayer = try? Self.makeAudioPlayer(for: song.audioFileURL) else {
+            // File missing/corrupt: keep the queue visible; resume() falls
+            // back to a fresh loadAndPlay which auto-skips on failure.
+            duration = 0
+            currentTime = 0
+            return
+        }
+        player = restoredPlayer
+        restoredPlayer.delegate = self
+        restoredPlayer.enableRate = true
+        restoredPlayer.prepareToPlay()
+        duration = restoredPlayer.duration
+        let clamped = min(max(0, position), max(0, restoredPlayer.duration - 1))
+        restoredPlayer.currentTime = clamped
+        currentTime = clamped
+        updateNowPlayingInfo()
     }
 
     func toggleFavorite() {
@@ -409,6 +555,8 @@ class MusicPlayerManager: NSObject, ObservableObject {
         isPlaying = false
         stopTimer()
         updateNowPlayingInfo()
+        saveSession()
+        persistPlaybackPosition()
     }
 
     func togglePlayPause() {
@@ -420,6 +568,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
     }
 
     func stop() {
+        persistPlaybackPosition()
         player?.stop()
         player = nil
         secondaryPlayer?.stop()
@@ -431,6 +580,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
         duration = 0
         stopTimer()
         updateNowPlayingInfo(clear: true)
+        saveSession() // clears the stored session — nothing to come back to
     }
 
     // MARK: - Seek
@@ -439,6 +589,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
         activePlayer?.currentTime = time
         currentTime = time
         updateNowPlayingInfo()
+        saveSession()
     }
 
     // MARK: - Next / Previous
@@ -502,12 +653,14 @@ class MusicPlayerManager: NSObject, ObservableObject {
                 currentIndex = 0
             }
         }
+        saveSession()
     }
 
     // MARK: - Repeat
     func cycleRepeatMode() {
         let next = (repeatMode.rawValue + 1) % RepeatMode.allCases.count
         repeatMode = RepeatMode(rawValue: next) ?? .off
+        saveSession()
     }
 
     // MARK: - Timer (progress tracking)
@@ -524,6 +677,14 @@ class MusicPlayerManager: NSObject, ObservableObject {
                 self.backgroundTicks += 1
                 if self.backgroundTicks % 4 == 0 { // ~every 1 second
                     self.updateNowPlayingElapsedTime()
+                }
+                // Periodic local-first persistence: session snapshot (~5s),
+                // long-track resume position (~15s, no-op for short songs).
+                if self.backgroundTicks % 20 == 0 {
+                    self.saveSession()
+                }
+                if self.backgroundTicks % 60 == 0 {
+                    self.persistPlaybackPosition()
                 }
                 
                 // Auto-next logic: If near end and crossfade enabled

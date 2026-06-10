@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import UniformTypeIdentifiers
 
 struct SongsLibraryView: View {
     @ObservedObject var dataManager = DataManager.shared
@@ -16,11 +17,16 @@ struct SongsLibraryView: View {
     @State private var showMultiDeleteConfirmation = false
     @State private var showNewPlaylistFromSelection = false
     @State private var newPlaylistName = ""
+    @State private var showAudioImporter = false
+    @State private var importResultMessage = ""
+    @State private var showImportResult = false
 
     enum SortOption: String, CaseIterable {
         case dateAdded = "Recently Added"
         case title = "Title"
         case artist = "Artist"
+        case lastPlayed = "Recently Played"
+        case mostPlayed = "Most Played"
     }
 
     var filteredSongs: [SongData] {
@@ -40,6 +46,13 @@ struct SongsLibraryView: View {
             songs.sort { $0.title.localizedCompare($1.title) == .orderedAscending }
         case .artist:
             songs.sort { $0.artist.localizedCompare($1.artist) == .orderedAscending }
+        case .lastPlayed:
+            songs.sort { ($0.lastPlayedDate ?? .distantPast) > ($1.lastPlayedDate ?? .distantPast) }
+        case .mostPlayed:
+            songs.sort {
+                if $0.playCount != $1.playCount { return $0.playCount > $1.playCount }
+                return ($0.lastPlayedDate ?? .distantPast) > ($1.lastPlayedDate ?? .distantPast)
+            }
         }
 
         return songs
@@ -67,9 +80,29 @@ struct SongsLibraryView: View {
         .searchable(text: $searchText, prompt: "Search songs")
         .navigationTitle("Library")
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    showAudioImporter = true
+                } label: {
+                    Image(systemName: "square.and.arrow.down")
+                }
+                .accessibilityLabel("Import audio files")
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 editButton
             }
+        }
+        .fileImporter(
+            isPresented: $showAudioImporter,
+            allowedContentTypes: [.audio],
+            allowsMultipleSelection: true
+        ) { result in
+            handleAudioImport(result)
+        }
+        .alert("Import Files", isPresented: $showImportResult) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(importResultMessage)
         }
         .onChange(of: editMode) { _, newValue in
             withAnimation {
@@ -105,6 +138,27 @@ struct SongsLibraryView: View {
         } message: {
             Text("Enter a name for your new playlist.")
         }
+    }
+
+    private func handleAudioImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            let outcome = dataManager.importAudioFiles(from: urls)
+            if outcome.imported > 0 {
+                Haptics.success()
+            } else {
+                Haptics.warning()
+            }
+            if outcome.skipped == 0 {
+                importResultMessage = "Imported \(outcome.imported) song\(outcome.imported == 1 ? "" : "s")."
+            } else {
+                importResultMessage = "Imported \(outcome.imported), skipped \(outcome.skipped) (unsupported format or unreadable file)."
+            }
+        case .failure(let error):
+            Haptics.warning()
+            importResultMessage = "Import failed: \(error.localizedDescription)"
+        }
+        showImportResult = true
     }
 
     private func createPlaylistFromSelection() {
@@ -188,6 +242,7 @@ struct SongsLibraryView: View {
                 }
                 .swipeActions(edge: .leading) {
                     Button {
+                        Haptics.light()
                         player.toggleFavorite(for: songData.id)
                     } label: {
                         Image(systemName: songData.isFavorited ? "heart.slash.fill" : "heart.fill")
@@ -307,10 +362,26 @@ struct SongsLibraryView: View {
             Text("Your library is empty")
                 .font(.system(size: 20, weight: .bold, design: .rounded))
 
-            Text("Download songs from YouTube\nto start building your collection")
+            Text("Download songs from YouTube\nor import audio files you already own")
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+
+            Button {
+                showAudioImporter = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Import from Files")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 10)
+                .background(.green, in: Capsule())
+            }
+            .padding(.top, 4)
 
             Spacer()
         }

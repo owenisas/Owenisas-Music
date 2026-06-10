@@ -207,4 +207,64 @@ struct DataManagerSyncTests {
 
         #expect(playlist.songs.count == 2)
     }
+
+    // MARK: - importAudioFiles
+
+    @Test("Import copies an outside audio file into Songs and indexes it")
+    func importCopiesOutsideFile() throws {
+        let id = "__test_import_\(UUID().uuidString.prefix(8))"
+        defer { removeSongFolder(name: id) }
+
+        let fm = FileManager.default
+        let source = fm.temporaryDirectory.appendingPathComponent("\(id).mp3")
+        try Data(repeating: 0xAB, count: 600_000).write(to: source)
+        defer { try? fm.removeItem(at: source) }
+
+        let dm = DataManager()
+        dm.configure(with: try makeContext())
+
+        let outcome = dm.importAudioFiles(from: [source])
+
+        #expect(outcome.imported == 1)
+        #expect(outcome.skipped == 0)
+        let copied = songsFolder.appendingPathComponent(id).appendingPathComponent("\(id).mp3")
+        #expect(fm.fileExists(atPath: copied.path))
+        #expect(fm.fileExists(atPath: source.path)) // copy, not move
+        #expect(dm.fetchAllSongs().contains { $0.id == id })
+    }
+
+    @Test("Importing a file already inside Songs re-indexes without deleting it")
+    func importOwnFileIsNonDestructive() throws {
+        let id = "__test_selfimport_\(UUID().uuidString.prefix(8))"
+        defer { removeSongFolder(name: id) }
+
+        try createSongFolder(name: id) // creates Songs/<id>/<id>.mp3
+        let ownFile = songsFolder.appendingPathComponent(id).appendingPathComponent("\(id).mp3")
+
+        let dm = DataManager()
+        dm.configure(with: try makeContext())
+
+        let outcome = dm.importAudioFiles(from: [ownFile])
+
+        #expect(outcome.imported == 1)
+        #expect(outcome.skipped == 0)
+        #expect(FileManager.default.fileExists(atPath: ownFile.path)) // must survive
+        #expect(dm.fetchAllSongs().contains { $0.id == id })
+    }
+
+    @Test("Unsupported file types are skipped, not copied")
+    func importSkipsUnsupportedTypes() throws {
+        let fm = FileManager.default
+        let source = fm.temporaryDirectory.appendingPathComponent("__test_import_bad.pdf")
+        try Data(repeating: 0x01, count: 10_000).write(to: source)
+        defer { try? fm.removeItem(at: source) }
+
+        let dm = DataManager()
+        dm.configure(with: try makeContext())
+
+        let outcome = dm.importAudioFiles(from: [source])
+
+        #expect(outcome.imported == 0)
+        #expect(outcome.skipped == 1)
+    }
 }

@@ -35,6 +35,15 @@ class DataManager: ObservableObject {
             }
         }
         observerTokens.append(favoriteObserver)
+
+        let positionObserver = NotificationCenter.default.addObserver(forName: .init("SongPositionChanged"), object: nil, queue: .main) { [weak self] note in
+            guard let songId = note.object as? String,
+                  let position = note.userInfo?["position"] as? TimeInterval else { return }
+            Task { @MainActor in
+                self?.updatePlaybackPosition(songId: songId, position: position)
+            }
+        }
+        observerTokens.append(positionObserver)
     }
 
     deinit {
@@ -58,6 +67,15 @@ class DataManager: ObservableObject {
         let descriptor = FetchDescriptor<SongData>(predicate: #Predicate { $0.id == songId })
         if let song = (try? ctx.fetch(descriptor))?.first {
             song.isFavorited.toggle()
+            try? ctx.save()
+        }
+    }
+
+    private func updatePlaybackPosition(songId: String, position: TimeInterval) {
+        guard let ctx = modelContext else { return }
+        let descriptor = FetchDescriptor<SongData>(predicate: #Predicate { $0.id == songId })
+        if let song = (try? ctx.fetch(descriptor))?.first, abs(song.playbackPosition - position) >= 1 {
+            song.playbackPosition = position
             try? ctx.save()
         }
     }
@@ -300,7 +318,7 @@ class DataManager: ObservableObject {
     }
 
     private func firstValidAudioFile(in contents: [URL], fileManager: FileManager) -> URL? {
-        let audioExts = ["mp3", "wav", "m4a", "aac", "flac"]
+        let audioExts = ["mp3", "wav", "m4a", "aac", "flac", "aiff", "aif"]
 
         for file in contents where audioExts.contains(file.pathExtension.lowercased()) {
             let attr = (try? fileManager.attributesOfItem(atPath: file.path)) ?? [:]
@@ -536,6 +554,165 @@ class DataManager: ObservableObject {
 
     func deleteSong(_ song: SongData) {
         deleteSongs([song])
+    }
+
+    // MARK: - Import local audio files
+    /// Audio formats the player and sync pipeline both understand.
+    static let importableAudioExtensions: Set<String> = ["mp3", "wav", "m4a", "aac", "flac", "aiff", "aif"]
+
+    /// Copies user-picked audio files into Documents/Songs/<name>/ and syncs them.
+    /// Returns how many imported vs. skipped (unsupported type or copy failure).
+    func importAudioFiles(from urls: [URL]) -> (imported: Int, skipped: Int) {
+        let fm = FileManager.default
+        guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return (0, urls.count)
+        }
+
+        var imported = 0
+        var skipped = 0
+
+        for url in urls {
+            guard Self.importableAudioExtensions.contains(url.pathExtension.lowercased()) else {
+                skipped += 1
+                continue
+            }
+
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+            let folderName = url.deletingPathExtension().lastPathComponent
+                .precomposedStringWithCanonicalMapping
+                .replacingOccurrences(of: "/", with: "-")
+                .replacingOccurrences(of: ":", with: "-")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !folderName.isEmpty else {
+                skipped += 1
+                continue
+            }
+
+            let songFolder = docs.appendingPathComponent("Songs").appendingPathComponent(folderName)
+            let destination = songFolder.appendingPathComponent(url.lastPathComponent)
+            // Picking a file already inside our own Songs folder must not
+            // delete-then-copy onto itself — just (re)index it in place.
+            let sourcePath = url.resolvingSymlinksInPath().standardizedFileURL.path
+            let destinationPath = destination.resolvingSymlinksInPath().standardizedFileURL.path
+            if sourcePath == destinationPath {
+                syncSingleSong(folderName: folderName)
+                imported += 1
+                continue
+            }
+            do {
+                try fm.createDirectory(at: songFolder, withIntermediateDirectories: true)
+                if fm.fileExists(atPath: destination.path) {
+                    try fm.removeItem(at: destination)
+                }
+                try fm.copyItem(at: url, to: destination)
+                syncSingleSong(folderName: folderName)
+                imported += 1
+            } catch {
+                print("[DEBUG] DataManager: Import failed for \(url.lastPathComponent): \(error.localizedDescription)")
+                skipped += 1
+            }
+        }
+
+        if imported > 0 {
+            NotificationCenter.default.post(name: .init("SongsFolderChanged"), object: nil)
+        }
+        return (imported, skipped)
+    }
+
+    // MARK: - Backup & restore (playlists, likes, play history)
+    func exportBackupData() -> Data? {
+        guard let ctx = modelContext else { return nil }
+        let songs = (try? ctx.fetch(FetchDescriptor<SongData>())) ?? []
+        let playlists = (try? ctx.fetch(FetchDescriptor<PlaylistData>())) ?? []
+
+        let backup = LibraryBackup(
+            exportDate: .now,
+            songs: songs.map {
+                LibraryBackup.SongBackup(
+                    id: $0.id,
+                    playCount: $0.playCount,
+                    isFavorited: $0.isFavorited,
+                    lastPlayedDate: $0.lastPlayedDate,
+                    dateAdded: $0.dateAdded,
+                    playbackPosition: $0.playbackPosition > 0 ? $0.playbackPosition : nil
+                )
+            },
+            playlists: playlists.map {
+                LibraryBackup.PlaylistBackup(
+                    title: $0.title,
+                    dateCreated: $0.dateCreated,
+                    songIDs: $0.songs.map(\.id)
+                )
+            }
+        )
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try? encoder.encode(backup)
+    }
+
+    /// Merges a backup into the current library. Never deletes anything:
+    /// likes/play counts take the richer value, playlists are matched by title.
+    @discardableResult
+    func importBackupData(_ data: Data) -> LibraryBackupImportResult? {
+        guard let ctx = modelContext else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let backup = try? decoder.decode(LibraryBackup.self, from: data) else { return nil }
+
+        let allSongs = (try? ctx.fetch(FetchDescriptor<SongData>())) ?? []
+        let songsByID = Dictionary(allSongs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+
+        var matchedSongs = 0
+        for entry in backup.songs {
+            guard let song = songsByID[entry.id] else { continue }
+            matchedSongs += 1
+            song.playCount = max(song.playCount, entry.playCount)
+            song.isFavorited = song.isFavorited || entry.isFavorited
+            if let last = entry.lastPlayedDate {
+                song.lastPlayedDate = max(song.lastPlayedDate ?? .distantPast, last)
+            }
+            if let added = entry.dateAdded, added < song.dateAdded {
+                song.dateAdded = added
+            }
+            if let position = entry.playbackPosition, song.playbackPosition == 0 {
+                song.playbackPosition = position
+            }
+        }
+
+        var newPlaylists = 0
+        let existingPlaylists = (try? ctx.fetch(FetchDescriptor<PlaylistData>())) ?? []
+        for entry in backup.playlists {
+            let target: PlaylistData
+            if let existing = existingPlaylists.first(where: { $0.title == entry.title }) {
+                target = existing
+            } else {
+                target = PlaylistData(title: entry.title, dateCreated: entry.dateCreated)
+                ctx.insert(target)
+                newPlaylists += 1
+            }
+            for songID in entry.songIDs {
+                if let song = songsByID[songID], !target.songs.contains(where: { $0.id == song.id }) {
+                    target.songs.append(song)
+                }
+            }
+        }
+
+        do {
+            try ctx.save()
+        } catch {
+            print("[DEBUG] DataManager: Backup import save failed: \(error.localizedDescription)")
+            return nil
+        }
+        NotificationCenter.default.post(name: .init("PlaylistsChanged"), object: nil)
+        return LibraryBackupImportResult(
+            matchedSongs: matchedSongs,
+            totalSongs: backup.songs.count,
+            newPlaylists: newPlaylists
+        )
     }
 
     // MARK: - Convert SongData → Song (lightweight struct for player)

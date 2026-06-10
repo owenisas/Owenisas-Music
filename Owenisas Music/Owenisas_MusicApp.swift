@@ -72,9 +72,12 @@ struct Owenisas_MusicApp: App {
                 dataManager.configure(with: sharedModelContainer.mainContext)
                 if ProcessInfo.processInfo.arguments.contains("UI_TEST_RESET_LIBRARY") {
                     dataManager.resetLibraryForUITests()
+                    PlaybackSessionStore.clear()
                 }
                 createSongsFolderIfNeeded()
                 dataManager.syncFromFileSystem()
+                // Continue where you left off: rebuild the last queue, paused.
+                player.restoreSession(songs: dataManager.toSongs(dataManager.fetchAllSongs()))
                 cleanupTemporaryFiles()
             }
             .modelContainer(sharedModelContainer)
