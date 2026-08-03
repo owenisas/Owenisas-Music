@@ -65,7 +65,7 @@ struct DataManagerSyncTests {
         #expect(dm.fetchAllSongs().contains { $0.id == id })
     }
 
-    @Test("Broken folder (tiny audio) cleaned up before indexing — no ghost song")
+    @Test("Folder with unvalidated audio is preserved and not indexed")
     func brokenFolderCleaned() throws {
         let id = "__test_broken_\(UUID().uuidString.prefix(8))"
         defer { removeSongFolder(name: id) }
@@ -77,8 +77,8 @@ struct DataManagerSyncTests {
         dm.syncFromFileSystem()
 
         #expect(!dm.fetchAllSongs().contains { $0.id == id })
-        // Folder itself should have been deleted on disk
-        #expect(!FileManager.default.fileExists(atPath: songsFolder.appendingPathComponent(id).path))
+        // Sync must never delete user-owned audio folders.
+        #expect(FileManager.default.fileExists(atPath: songsFolder.appendingPathComponent(id).path))
     }
 
     @Test("Sync removes SongData when folder disappears from disk")

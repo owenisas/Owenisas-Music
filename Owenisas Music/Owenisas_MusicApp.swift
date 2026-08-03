@@ -16,7 +16,15 @@ struct Owenisas_MusicApp: App {
         do {
             return try ModelContainer(for: schema, configurations: [config])
         } catch {
-            fatalError("Could not create ModelContainer: \(error)")
+            // Preserve app launch and expose a usable session if persistent storage is
+            // unavailable (for example after a partial migration or disk error).
+            print("[DataStore] Persistent container unavailable: \(error). Falling back to memory.")
+            let fallback = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+            do {
+                return try ModelContainer(for: schema, configurations: [fallback])
+            } catch {
+                fatalError("Could not create fallback ModelContainer: \(error)")
+            }
         }
     }()
 

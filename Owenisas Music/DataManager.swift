@@ -280,8 +280,10 @@ class DataManager: ObservableObject {
             let hasValidAudio = firstValidAudioFile(in: contents, fileManager: fm) != nil
             
             if !hasValidAudio {
-                print("[DEBUG] DataManager: Cleaning up broken/empty/corrupted folder: \(folder.lastPathComponent)")
-                try? fm.removeItem(at: folder)
+                // Never delete user audio folders during a background sync. A file can be
+                // short, temporarily unavailable, or use a codec that this pass cannot
+                // inspect. Leave it in place so the user can repair or re-import it.
+                print("[DEBUG] DataManager: Skipping folder without validated audio: \(folder.lastPathComponent)")
                 continue
             }
             

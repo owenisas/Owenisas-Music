@@ -342,7 +342,25 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    console.log(`[Proxy] Fetching: ${targetUrl.substring(0, 80)}...`);
+    let target;
+    try {
+      target = new URL(targetUrl);
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'text/plain' });
+      res.end('Invalid url parameter');
+      return;
+    }
+
+    const hostname = target.hostname.toLowerCase();
+    const isYouTubeHost = hostname === 'youtube.com' || hostname.endsWith('.youtube.com');
+    const isGoogleVideoHost = hostname === 'googlevideo.com' || hostname.endsWith('.googlevideo.com');
+    if (target.protocol !== 'https:' || (!isYouTubeHost && !isGoogleVideoHost)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain' });
+      res.end('Proxy target is not an approved YouTube media host');
+      return;
+    }
+
+    console.log(`[Proxy] Fetching: ${target.toString().substring(0, 80)}...`);
 
     try {
       const requestHeaders = {
@@ -356,7 +374,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const cookieString = loadCookies();
-      if (cookieString) {
+      if (cookieString && isYouTubeHost) {
         requestHeaders['Cookie'] = cookieString;
       }
 
@@ -411,7 +429,13 @@ const server = http.createServer(async (req, res) => {
     }
   } else {
     // Serve static files from 'public' directory
-    let filePath = path.join(__dirname, 'public', pathname === '/' ? 'index.html' : pathname);
+    const publicRoot = path.resolve(__dirname, 'public');
+    const filePath = path.resolve(publicRoot, pathname === '/' ? 'index.html' : `.${pathname}`);
+    if (filePath !== publicRoot && !filePath.startsWith(`${publicRoot}${path.sep}`)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain' });
+      res.end('Forbidden');
+      return;
+    }
     const ext = path.extname(filePath);
     
     const contentTypeMap = {
