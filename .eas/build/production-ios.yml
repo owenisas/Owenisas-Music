@@ -6,12 +6,19 @@ build:
         name: Verify non-beta Xcode 26.4
         command: |
           set -eo pipefail
-          xcodebuild -version
-          if xcodebuild -version 2>&1 | grep -qi beta; then
+          XCODE_VERSION="$(xcodebuild -version)"
+          printf '%s\n' "$XCODE_VERSION"
+          if [[ "$XCODE_VERSION" == *[Bb][Ee][Tt][Aa]* ]]; then
             echo "ERROR: beta Xcode detected; refusing App Store archive."
             exit 1
           fi
-          xcodebuild -version | grep -q 'Xcode 26.4'
+          case "$XCODE_VERSION" in
+            'Xcode 26.4'* ) ;;
+            * )
+              echo "ERROR: expected release Xcode 26.4.x."
+              exit 1
+              ;;
+          esac
     - run:
         name: Import manual signing assets
         command: |
