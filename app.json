@@ -1,0 +1,17 @@
+{
+  "expo": {
+    "name": "Owenisas Music",
+    "slug": "owenisas-music",
+    "owner": "owenisas",
+    "version": "1.0.0",
+    "ios": {
+      "bundleIdentifier": "com.Owenisas-Music",
+      "buildNumber": "202608120103"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "e367b8ee-006d-45c3-aef1-adaa58293dff"
+      }
+    }
+  }
+}

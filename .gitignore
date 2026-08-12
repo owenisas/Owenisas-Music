@@ -4,6 +4,9 @@
 
 # Xcode
 build/
+!.eas/
+!.eas/build/
+!.eas/build/production-ios.yml
 *.pbxuser
 !default.pbxuser
 *.mode1v3
@@ -52,3 +55,7 @@ backend/output.txt
 test-youtube/*.m4a
 test-youtube/downloads/
 storage/
+signing/
+export/
+*.xcarchive/
+*-ci.keychain-db
