@@ -13,6 +13,7 @@ signing/
 backend/__pycache__/
 backend/venv/
 backend/output.txt
+backend/*.ctl
 backend/yt-dlp
 backend/*cookies.txt
 test-youtube/
