@@ -3,8 +3,15 @@ import SwiftData
 
 @main
 struct Owenisas_MusicApp: App {
+    private enum AppTab: Hashable {
+        case home
+        case search
+        case library
+    }
+
     @ObservedObject private var player = MusicPlayerManager.shared
     @ObservedObject private var dataManager = DataManager.shared
+    @State private var selectedTab: AppTab = ProcessInfo.processInfo.arguments.contains("APP_STORE_SCREENSHOT_LIBRARY") ? .library : .home
 
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
@@ -30,10 +37,11 @@ struct Owenisas_MusicApp: App {
 
     var body: some Scene {
         WindowGroup {
-            TabView {
+            TabView(selection: $selectedTab) {
                 NavigationStack {
                     ContentView()
                 }
+                .tag(AppTab.home)
                 .tabItem {
                     Image(systemName: "house.fill")
                     Text("Home")
@@ -42,6 +50,7 @@ struct Owenisas_MusicApp: App {
                 NavigationStack {
                     SearchView()
                 }
+                .tag(AppTab.search)
                 .tabItem {
                     Image(systemName: "magnifyingglass")
                     Text("Search")
@@ -50,6 +59,7 @@ struct Owenisas_MusicApp: App {
                 NavigationStack {
                     SongsLibraryView()
                 }
+                .tag(AppTab.library)
                 .tabItem {
                     Image(systemName: "books.vertical.fill")
                     Text("Library")
