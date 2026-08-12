@@ -55,13 +55,6 @@ struct Owenisas_MusicApp: App {
                     Text("Library")
                 }
 
-                NavigationStack {
-                    DownloadView()
-                }
-                .tabItem {
-                    Image(systemName: "arrow.down.circle.fill")
-                    Text("Download")
-                }
             }
             .tint(.green)
             .overlay(alignment: .bottom) {

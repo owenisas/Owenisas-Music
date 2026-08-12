@@ -362,7 +362,7 @@ struct SongsLibraryView: View {
             Text("Your library is empty")
                 .font(.system(size: 20, weight: .bold, design: .rounded))
 
-            Text("Download songs from YouTube\nor import audio files you already own")
+            Text("Import audio files you already own\nfrom Files on this device")
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

@@ -212,8 +212,16 @@ struct SettingsView: View {
                 HStack {
                     Text("Version")
                     Spacer()
-                    Text("2.1.0")
+                    Text(appVersion)
                         .foregroundStyle(.secondary)
+                }
+
+                Link(destination: URL(string: "https://github.com/owenisas/Owenisas-Music/blob/main/SUPPORT.md")!) {
+                    Label("Support", systemImage: "questionmark.circle")
+                }
+
+                Link(destination: URL(string: "https://github.com/owenisas/Owenisas-Music/blob/main/PRIVACY.md")!) {
+                    Label("Privacy Policy", systemImage: "hand.raised")
                 }
             } header: {
                 Text("About")
@@ -255,6 +263,10 @@ struct SettingsView: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
         return "Owenisas-Music-Backup-\(formatter.string(from: .now))"
+    }
+
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
     }
 
     private func handleBackupImport(_ result: Result<URL, Error>) {

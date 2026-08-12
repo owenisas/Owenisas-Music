@@ -12,7 +12,7 @@ A local-first iOS and iPadOS music library and player built with SwiftUI. Import
 - Plays local MP3, M4A, AAC, WAV, and FLAC files with queue management, shuffle, repeat, crossfade, and playback-speed controls.
 - Restores playback sessions and keeps recently played, most played, liked-song, playlist, and listening-history state on the device.
 - Provides search, browse, album/artist views, playlist management, library backup, and Now Playing controls.
-- Fetches optional synced lyrics through LRCLIB and can use the companion backend to prepare audio from supported YouTube video IDs.
+- Keeps the App Store build local-only with no account, tracking, analytics, advertising, or remote media-download service.
 
 ## Screenshots and demo
 
@@ -25,11 +25,10 @@ iOS / iPadOS SwiftUI app
   ├─ SwiftData library and playlist models
   ├─ Documents/Songs/ local audio storage
   ├─ AVAudioPlayer + MediaPlayer remote controls
-  ├─ LRCLIB lyrics lookup (optional)
-  └─ optional Flask + yt-dlp backend for audio preparation
+  └─ local backup/export through Apple's system file picker
 ```
 
-The backend is not required for local playback. It exposes narrow endpoints for version checks, audio preparation, and lyrics conversion; deploy it separately and provide credentials/cookies only through private runtime configuration.
+The App Store target is local-only. Historical/private backend tooling remains outside the shipping target and is not part of the App Store binary.
 
 ## Build and test
 
@@ -51,7 +50,7 @@ Open `Owenisas Music.xcodeproj` for interactive development. The repository also
 
 ## Privacy and scope
 
-Owenisas Music is a personal-use project, not an App Store distribution. Local audio and library state are intended to remain on-device. If the optional backend is enabled, review its deployment configuration and do not commit YouTube cookies, downloaded media, runtime logs, or private tokens.
+The App Store build keeps local audio and library state on-device. See [PRIVACY.md](PRIVACY.md) and [SUPPORT.md](SUPPORT.md).
 
 ## License
 
