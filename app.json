@@ -4,9 +4,15 @@
     "slug": "owenisas-music",
     "owner": "owenisas",
     "version": "1.0.0",
+    "platforms": [
+      "ios"
+    ],
     "ios": {
       "bundleIdentifier": "com.Owenisas-Music",
-      "buildNumber": "202608120103"
+      "buildNumber": "202608120103",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "extra": {
       "eas": {

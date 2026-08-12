@@ -1,5 +1,8 @@
 {
   "name": "owenisas-music-ios-build",
   "version": "1.0.0",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "expo": "~53.0.0"
+  }
 }
