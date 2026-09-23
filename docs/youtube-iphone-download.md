@@ -14,7 +14,7 @@ Related: `youtube-coverage-2026-08-28.md` (client chain / coverage),
 | Item | State |
 |---|---|
 | App Store binary | import-only; 0 YouTube strings. Do not upload without sign-off. |
-| Debug / USB install | YouTube downloader **on**. Last working install: USB Debug to iPhone 13 mini `00008110-0016690A21F8401E` |
+| Debug / USB install | YouTube downloader **on**. Last working install: USB Debug to iPhone 13 mini `<iphone-udid>` |
 | Mainstream audio on phone | **Works** after the 2026-08-29 chunked-Range fix (Steins;Gate `Ttq6DJfA-So` downloaded) |
 | Kids / Baby Shark | Still not a client bug — live-control yt-dlp first (see tier2 doc) |
 | Share extension + background downloads (2026-09-22) | Simulator: Safari share → extension → app opened → download finished in the background. `BGContinuedProcessingTask` and open-from-extension not yet run on the phone. |
@@ -28,7 +28,7 @@ from this Mac in 0.1s** still sat at **0 bytes for minutes** in
 
 1. Copy the on-device log (app Documents, survives reinstall of the same bundle):
    ```
-   xcrun devicectl device copy from --device 00008110-0016690A21F8401E \
+   xcrun devicectl device copy from --device <iphone-udid> \
      --domain-type appDataContainer --domain-identifier com.Owenisas-Music \
      --source Documents/download-debug.log \
      --destination /tmp/owen-phone-logs/download-debug.log
@@ -227,7 +227,7 @@ Tests: `SharedInboxTests`, `BackgroundDownloadTests`.
 device UDID):
 
 ```
-UDID=00008110-0016690A21F8401E   # xcodebuild id; CoreDevice lists 341C7CEA-…
+UDID=<iphone-udid>   # xcodebuild id; CoreDevice lists a different id
 xcodebuild -scheme "Owenisas Music" -configuration Debug \
   -destination "platform=iOS,id=$UDID" \
   -derivedDataPath /tmp/owen-build-phone \
@@ -267,6 +267,6 @@ back to Home. Fix: `AppTab.download` + `.tag(AppTab.download)` inside
 
 | Name | ID | Use |
 |---|---|---|
-| CoreDevice / `devicectl list` | `341C7CEA-D0EA-5CDF-AE45-FF1083827154` | list/copy |
-| `xcodebuild -destination` / `devicectl install` | `00008110-0016690A21F8401E` | build + install |
+| CoreDevice / `devicectl list` | `<coredevice-id>` | list/copy |
+| `xcodebuild -destination` / `devicectl install` | `<iphone-udid>` | build + install |
 | Bundle | `com.Owenisas-Music` | app container |
