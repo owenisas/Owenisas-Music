@@ -12,7 +12,11 @@ A local-first iOS and iPadOS music library and player built with SwiftUI. Import
 - Plays local MP3, M4A, AAC, WAV, and FLAC files with queue management, shuffle, repeat, crossfade, and playback-speed controls.
 - Restores playback sessions and keeps recently played, most played, liked-song, playlist, and listening-history state on the device.
 - Provides search, browse, album/artist views, playlist management, library backup, and Now Playing controls.
-- Keeps the App Store build local-only with no account, tracking, analytics, advertising, or remote media-download service.
+- Optional iCloud sync of songs and library data across your devices (a mirror of `Documents/Songs` in the app's iCloud Drive folder).
+- Home Screen / Lock Screen Now Playing widgets and a Control Center play/pause control.
+- Apple Watch app: control the iPhone, browse and play the library, and download playlists to the watch for offline listening.
+- Share extension: save audio files from other apps (personal build also accepts YouTube links).
+- Keeps the App Store build free of accounts, tracking, analytics, advertising, and any remote media-download service.
 
 ## Screenshots and demo
 
@@ -47,6 +51,17 @@ xcodebuild test \
 ```
 
 Open `Owenisas Music.xcodeproj` for interactive development. The repository also contains UI tests and focused SwiftData/queue/library-backup tests.
+
+Tests that hit live YouTube are skipped by default. Opt in with `TEST_RUNNER_OWENISAS_LIVE_TESTS=1`.
+
+### Two builds from one target
+
+| Build | How | Contents |
+|---|---|---|
+| Personal (Debug / TestFlight internal) | Xcode run, `fastlane beta` | Everything, including the Download tab (`#if !APP_STORE`) |
+| App Store | `fastlane release`, EAS `production` | Import-only; built with `SWIFT_ACTIVE_COMPILATION_CONDITIONS=APP_STORE`, and the EAS step fails if any YouTube code or resource is bundled |
+
+App Store Review Guideline 5.2.3 rejects apps that download media from YouTube and similar sources, so the downloader must never reach an App Store submission.
 
 ## Privacy and scope
 

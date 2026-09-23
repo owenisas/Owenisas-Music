@@ -5,7 +5,7 @@ import SwiftData
 /// activity derived entirely from on-device play counts and song durations.
 struct StatsView: View {
     @Query private var allSongs: [SongData]
-    @ObservedObject var player = MusicPlayerManager.shared
+    private let player = MusicPlayerManager.shared
     @ObservedObject var dataManager = DataManager.shared
 
     // MARK: - Derived stats
@@ -63,7 +63,6 @@ struct StatsView: View {
                         topArtistsSection
                     }
                 }
-                Spacer().frame(height: 100)
             }
             .padding(.horizontal, 16)
             .padding(.top, 8)

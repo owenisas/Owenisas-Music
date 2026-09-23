@@ -80,9 +80,7 @@ struct QueueView: View {
                                     .onTapGesture {
                                         let startIndex = player.currentSong == nil ? 0 : player.currentIndex + 1
                                         let realIndex = startIndex + index
-                                        if realIndex < player.queue.count {
-                                            player.play(song: player.queue[realIndex], in: nil)
-                                        }
+                                        player.playFromQueue(at: realIndex)
                                     }
                                 }
                                 .onMove(perform: moveSongs)

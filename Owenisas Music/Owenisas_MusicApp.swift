@@ -1,17 +1,29 @@
 import SwiftUI
 import SwiftData
 
+enum AppTab: Hashable {
+    case home
+    case search
+    case library
+    #if !APP_STORE
+    case download
+    #endif
+}
+
+/// The selected tab, settable from outside the view tree (e.g. a shared
+/// link switches to Download; see IncomingShares).
+@MainActor
+final class AppRouter: ObservableObject {
+    static let shared = AppRouter()
+
+    @Published var selectedTab: AppTab = ProcessInfo.processInfo.arguments.contains("APP_STORE_SCREENSHOT_LIBRARY") ? .library : .home
+}
+
 @main
 struct Owenisas_MusicApp: App {
-    private enum AppTab: Hashable {
-        case home
-        case search
-        case library
-    }
-
-    @ObservedObject private var player = MusicPlayerManager.shared
-    @ObservedObject private var dataManager = DataManager.shared
-    @State private var selectedTab: AppTab = ProcessInfo.processInfo.arguments.contains("APP_STORE_SCREENSHOT_LIBRARY") ? .library : .home
+    private let player = MusicPlayerManager.shared
+    private let dataManager = DataManager.shared
+    @ObservedObject private var router = AppRouter.shared
 
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
@@ -19,14 +31,21 @@ struct Owenisas_MusicApp: App {
             AlbumData.self,
             PlaylistData.self,
         ])
-        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+        // groupContainer / cloudKitDatabase: .none — the app now has App Group
+        // and iCloud entitlements (widget/share extension, iCloud Drive song
+        // mirror). With the defaults, SwiftData would move the store into the
+        // App Group (existing installs open an empty library) and switch to
+        // CloudKit mode (rejects our unique constraints → crash at launch).
+        // The store stays where it always was; library data syncs through
+        // LibraryCloudSync instead.
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false, groupContainer: .none, cloudKitDatabase: .none)
         do {
             return try ModelContainer(for: schema, configurations: [config])
         } catch {
             // Preserve app launch and expose a usable session if persistent storage is
             // unavailable (for example after a partial migration or disk error).
             print("[DataStore] Persistent container unavailable: \(error). Falling back to memory.")
-            let fallback = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+            let fallback = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, groupContainer: .none, cloudKitDatabase: .none)
             do {
                 return try ModelContainer(for: schema, configurations: [fallback])
             } catch {
@@ -35,12 +54,27 @@ struct Owenisas_MusicApp: App {
         }
     }()
 
+    init() {
+        // A watch request can wake the app in the background without a
+        // window, so onAppear never runs: wire the data layer and the watch
+        // link here too (both are idempotent).
+        dataManager.configure(with: sharedModelContainer.mainContext)
+        // Same for a widget / Control Center / Lock Screen play tap on a cold
+        // launch: restore the last queue now so the intent has something to
+        // play. (restoreSession runs at most once; UI tests reset first.)
+        if !ProcessInfo.processInfo.arguments.contains("UI_TEST_RESET_LIBRARY") {
+            player.restoreSession(songs: dataManager.toSongs(dataManager.fetchAllSongs()))
+        }
+        WatchBridge.shared.start()
+    }
+
     var body: some Scene {
         WindowGroup {
-            TabView(selection: $selectedTab) {
+            TabView(selection: $router.selectedTab) {
                 NavigationStack {
                     ContentView()
                 }
+                .miniPlayerInset()
                 .tag(AppTab.home)
                 .tabItem {
                     Image(systemName: "house.fill")
@@ -50,6 +84,7 @@ struct Owenisas_MusicApp: App {
                 NavigationStack {
                     SearchView()
                 }
+                .miniPlayerInset()
                 .tag(AppTab.search)
                 .tabItem {
                     Image(systemName: "magnifyingglass")
@@ -59,25 +94,28 @@ struct Owenisas_MusicApp: App {
                 NavigationStack {
                     SongsLibraryView()
                 }
+                .miniPlayerInset()
                 .tag(AppTab.library)
                 .tabItem {
                     Image(systemName: "books.vertical.fill")
                     Text("Library")
                 }
 
+                #if !APP_STORE
+                NavigationStack {
+                    DownloadView()
+                }
+                .miniPlayerInset()
+                .tag(AppTab.download)
+                .tabItem {
+                    Image(systemName: "arrow.down.circle.fill")
+                    Text("Download")
+                }
+                #endif
+
             }
             .tint(.green)
-            .overlay(alignment: .bottom) {
-                // Position mini player just above the tab bar
-                if player.showMiniPlayer {
-                    MiniPlayerView()
-                        .padding(.bottom, 50) // standard tab bar height
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
-            .fullScreenCover(isPresented: $player.showFullPlayer) {
-                NowPlayingView()
-            }
+            .modifier(FullPlayerCover())
             .onAppear {
                 setupAppearance()
                 dataManager.configure(with: sharedModelContainer.mainContext)
@@ -90,7 +128,26 @@ struct Owenisas_MusicApp: App {
                 // Continue where you left off: rebuild the last queue, paused.
                 player.restoreSession(songs: dataManager.toSongs(dataManager.fetchAllSongs()))
                 cleanupTemporaryFiles()
+                FeatureBootstrap.start()
+
+                // Diagnostic: --ui-test-resolve=<videoId> runs the innertube
+                // resolve only and logs which client won.
+                #if !APP_STORE
+                if let arg = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--ui-test-resolve=") }) {
+                    let videoId = String(arg.dropFirst("--ui-test-resolve=".count))
+                    Task.detached {
+                        NSLog("OWENISAS_RESOLVE: starting videoId=\(videoId)")
+                        do {
+                            let (info, client) = try await YouTubeClient.shared.resolveAudio(videoId: videoId)
+                            NSLog("OWENISAS_RESOLVE: SUCCESS client=\(client) title=\(info.title) url_len=\(info.audioUrl.count)")
+                        } catch {
+                            NSLog("OWENISAS_RESOLVE: FAILURE %@", error.localizedDescription)
+                        }
+                    }
+                }
+                #endif
             }
+            .onOpenURL { url in FeatureBootstrap.handle(url: url) }
             .modelContainer(sharedModelContainer)
         }
     }
@@ -151,6 +208,19 @@ struct Owenisas_MusicApp: App {
                     // Ignore errors for files that can't be deleted
                 }
             }
+        }
+    }
+}
+
+/// Presents the full player. Isolated in its own modifier so a player change
+/// re-renders only this, not the whole TabView (the App root used to observe
+/// the player and rebuild every tab on each song change).
+private struct FullPlayerCover: ViewModifier {
+    @ObservedObject private var player = MusicPlayerManager.shared
+
+    func body(content: Content) -> some View {
+        content.fullScreenCover(isPresented: $player.showFullPlayer) {
+            NowPlayingView()
         }
     }
 }

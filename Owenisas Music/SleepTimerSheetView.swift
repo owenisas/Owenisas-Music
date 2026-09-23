@@ -16,9 +16,16 @@ struct SleepTimerSheetView: View {
                         Text("Timer Active")
                             .font(.system(size: 18, weight: .bold))
 
-                        Text(player.sleepTimerRemainingFormatted)
-                            .font(.system(size: 32, weight: .bold, design: .monospaced))
-                            .foregroundStyle(.green)
+                        // Ticks on its own; the computed string never re-rendered.
+                        Group {
+                            if let end = player.sleepTimerEndDate, end > .now {
+                                Text(timerInterval: Date.now...end, countsDown: true)
+                            } else {
+                                Text(player.sleepTimerRemainingFormatted)
+                            }
+                        }
+                        .font(.system(size: 32, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.green)
 
                         Button(role: .destructive) {
                             player.cancelSleepTimer()
@@ -60,11 +67,11 @@ struct SleepTimerSheetView: View {
                                 HStack {
                                     Text(preset.label)
                                         .font(.system(size: 16, weight: .medium))
-                                        .foregroundStyle(.white)
+                                        .foregroundStyle(.primary)
                                     Spacer()
                                     Image(systemName: "moon.zzz")
                                         .font(.system(size: 13))
-                                        .foregroundStyle(.white.opacity(0.5))
+                                        .foregroundStyle(.secondary)
                                 }
                                 .padding(.horizontal, 20)
                                 .padding(.vertical, 13)
@@ -79,11 +86,11 @@ struct SleepTimerSheetView: View {
                             HStack {
                                 Text("End of Current Track")
                                     .font(.system(size: 16, weight: .medium))
-                                    .foregroundStyle(.white)
+                                    .foregroundStyle(.primary)
                                 Spacer()
                                 Image(systemName: "stop.circle")
                                     .font(.system(size: 13))
-                                    .foregroundStyle(.white.opacity(0.5))
+                                    .foregroundStyle(.secondary)
                             }
                             .padding(.horizontal, 20)
                             .padding(.vertical, 13)

@@ -21,7 +21,7 @@ struct DataManagerSyncTests {
     }
 
     private func makeContext() throws -> ModelContext {
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         let container = try ModelContainer(
             for: SongData.self, AlbumData.self, PlaylistData.self,
             configurations: config
@@ -217,7 +217,8 @@ struct DataManagerSyncTests {
 
         let fm = FileManager.default
         let source = fm.temporaryDirectory.appendingPathComponent("\(id).mp3")
-        try Data(repeating: 0xAB, count: 600_000).write(to: source)
+        // ID3 header so the library's playable-audio check accepts it.
+        try (Data("ID3".utf8) + Data(repeating: 0xAB, count: 600_000)).write(to: source)
         defer { try? fm.removeItem(at: source) }
 
         let dm = DataManager()
@@ -231,6 +232,17 @@ struct DataManagerSyncTests {
         #expect(fm.fileExists(atPath: copied.path))
         #expect(fm.fileExists(atPath: source.path)) // copy, not move
         #expect(dm.fetchAllSongs().contains { $0.id == id })
+    }
+
+    @Test("Playable check accepts every supported import format and rejects WebM")
+    func playableContainerHeaders() {
+        func head(_ s: String) -> Data { Data(s.utf8) + Data(repeating: 0, count: 12) }
+        #expect(PlayableLocalAudio.container(of: head("RIFF")) == .wav)
+        #expect(PlayableLocalAudio.container(of: head("fLaC")) == .flac)
+        #expect(PlayableLocalAudio.container(of: head("FORM")) == .aiff)
+        #expect(PlayableLocalAudio.container(of: head("ID3")) == .mp3)
+        #expect(PlayableLocalAudio.container(of: Data([0, 0, 0, 0x20]) + Data("ftypM4A ".utf8)) == .m4a)
+        #expect(PlayableLocalAudio.container(of: Data([0x1A, 0x45, 0xDF, 0xA3]) + Data(count: 12)) == .unplayable)
     }
 
     @Test("Importing a file already inside Songs re-indexes without deleting it")

@@ -3,14 +3,18 @@ import SwiftData
 
 struct PlaylistDetailView: View {
     @Bindable var playlist: PlaylistData
-    @ObservedObject var player = MusicPlayerManager.shared
+    private let player = MusicPlayerManager.shared
     @ObservedObject var dataManager = DataManager.shared
     @State private var showAddSongs = false
     @State private var showRenameAlert = false
+    @State private var showDeleteConfirm = false
     @State private var newName = ""
+    @Environment(\.dismiss) private var dismiss
+
+    private var orderedSongs: [SongData] { playlist.orderedSongs }
 
     var songs: [Song] {
-        dataManager.toSongs(playlist.songs)
+        dataManager.toSongs(orderedSongs)
     }
 
     var body: some View {
@@ -47,7 +51,7 @@ struct PlaylistDetailView: View {
                         }
                         
                         Button(role: .destructive) {
-                            dataManager.deletePlaylist(playlist)
+                            showDeleteConfirm = true
                         } label: {
                             Label("Delete Playlist", systemImage: "trash")
                         }
@@ -59,6 +63,18 @@ struct PlaylistDetailView: View {
         }
         .sheet(isPresented: $showAddSongs) {
             AddSongsToPlaylistView(playlist: playlist)
+        }
+        .confirmationDialog("Delete “\(playlist.title)”?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
+            Button("Delete Playlist", role: .destructive) {
+                // Leave the screen first: it read the deleted model and crashed.
+                let doomed = playlist
+                dismiss()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    dataManager.deletePlaylist(doomed)
+                }
+            }
+        } message: {
+            Text("The songs stay in your library.")
         }
         .alert("Rename Playlist", isPresented: $showRenameAlert) {
             TextField("Playlist name", text: $newName)
@@ -90,7 +106,7 @@ struct PlaylistDetailView: View {
     }
 
     private var playlistCover: some View {
-        let urls = Array(playlist.songs.compactMap { $0.coverImageURL }.prefix(4))
+        let urls = Array(orderedSongs.compactMap { $0.coverImageURL }.prefix(4))
 
         return Group {
             if urls.count >= 4 {
@@ -179,7 +195,7 @@ struct PlaylistDetailView: View {
             .listRowSeparator(.hidden)
             .padding(.bottom, 8)
 
-            ForEach(Array(zip(playlist.songs, songs).enumerated()), id: \.offset) { index, pair in
+            ForEach(Array(zip(orderedSongs, songs).enumerated()), id: \.element.0.persistentModelID) { index, pair in
                 let (songData, song) = pair
                 SongRow(song: song, index: index + 1, onRemove: {
                     dataManager.removeSong(songData, from: playlist)
@@ -193,24 +209,24 @@ struct PlaylistDetailView: View {
             .onDelete(perform: deleteSongs)
             .onMove(perform: moveSongs)
 
-            // space for mini player
-            Color.clear
-                .frame(height: 100)
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
         }
     }
 
     private func deleteSongs(at offsets: IndexSet) {
-        let songsToRemove = offsets.map { playlist.songs[$0] }
+        let current = orderedSongs
+        let songsToRemove = offsets.map { current[$0] }
         for songData in songsToRemove {
             dataManager.removeSong(songData, from: playlist)
         }
     }
 
     private func moveSongs(from source: IndexSet, to destination: Int) {
-        playlist.songs.move(fromOffsets: source, toOffset: destination)
+        var ids = orderedSongs.map(\.id)
+        ids.move(fromOffsets: source, toOffset: destination)
+        playlist.songOrder = ids
         try? dataManager.modelContext?.save()
+        // Lets iCloud sync pick up the new order right away.
+        NotificationCenter.default.post(name: .init("PlaylistsChanged"), object: nil)
     }
 }
 

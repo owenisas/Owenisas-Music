@@ -248,4 +248,51 @@ struct QueueManagementTests {
         #expect(player.queue.count == 1)
         #expect(player.currentSong?.id == "first")
     }
+
+    // MARK: - Song switching
+
+    @Test("Next past the last song cues the first song paused instead of wiping the player")
+    func nextAtEndCuesFirst() {
+        let player = makePlayer(songCount: 3, currentIndex: 2)
+
+        player.next()
+
+        #expect(player.currentSong?.id == "s1")
+        #expect(player.currentIndex == 0)
+        #expect(player.isPlaying == false)
+        #expect(player.queue.count == 3)
+    }
+
+    @Test("Next past the last song with repeat-all wraps to the first song")
+    func nextAtEndRepeatAllWraps() {
+        let player = makePlayer(songCount: 3, currentIndex: 2)
+        player.repeatMode = .all
+
+        player.next()
+
+        #expect(player.currentIndex == 0)
+        #expect(player.currentSong?.id == "s1")
+    }
+
+    @Test("Playing a queue slot uses that exact slot even when the song is queued twice")
+    func playFromQueueDuplicateSlot() {
+        let player = makePlayer(songCount: 3, currentIndex: 0)
+        player.playNext(makeSong(id: "s3")) // queue: s1, s3, s2, s3
+
+        player.playFromQueue(at: 3)
+
+        #expect(player.currentIndex == 3)
+        #expect(player.currentSong?.id == "s3")
+    }
+
+    @Test("Playing a song that is not in the queue inserts it after the current song")
+    func playUnknownSongInsertsNext() {
+        let player = makePlayer(songCount: 3, currentIndex: 0)
+
+        player.play(song: makeSong(id: "x"), in: nil)
+
+        #expect(player.queue.map(\.id) == ["s1", "x", "s2", "s3"])
+        #expect(player.currentIndex == 1)
+        #expect(player.currentSong?.id == "x")
+    }
 }

@@ -1,63 +1,74 @@
+#if !APP_STORE
 import SwiftUI
 import SwiftData
 import UserNotifications
+import AVFoundation
+import BackgroundTasks
 
 struct DownloadView: View {
     @State private var youtubeLink = ""
     @State private var isDownloading = false
     @State private var statusMessage = ""
     @State private var debugLogLines: [String] = []
+    @State private var showDetails = false
     @State private var downloadProgress: Double = 0
     @State private var downloadedCount = 0
     @State private var skippedCount = 0
     @State private var totalCount = 0
+    @State private var failedTrackTitles: [String] = []
     @State private var showAlert = false
     @State private var alertTitle = ""
     @State private var alertMessage = ""
+    @State private var alertOffersRetry = false
     @FocusState private var linkFieldIsFocused: Bool
-    
-    @State private var targetPlaylistName: String? = nil
-    @State private var targetPlaylistCover: String? = nil
-    @State private var downloadedTrackTitles: [String] = []
-    @State private var failedTrackTitles: [String] = []
-    @State private var activeDownloadToken: UUID? = nil
-    
-    @State private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+
+    @State private var activeJob: DownloadJob? = nil
+    @State private var playlistChoice: PlaylistChoice? = nil
+    @State private var showPlaylistChoice = false
+    /// Keeps the whole session (one job, or several queued links in a row)
+    /// running in the background. See `BackgroundDownloadActivity`.
+    @State private var backgroundActivity: BackgroundDownloadActivity? = nil
 
     @ObservedObject var dataManager = DataManager.shared
+    /// Links from the share extension / `owenisas://download?url=`.
+    @ObservedObject private var requests = DownloadRequestCenter.shared
     @Environment(\.modelContext) private var environmentModelContext
 
-    private let youtubeUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
     private let desktopUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
-    private let audioDownloadRetries = 4
-    private let audioRetryDelay: TimeInterval = 2
-    private let maxAudioDownloadDuration: TimeInterval = 45
-    private let slowAudioBytesPerSecond: Double = 75_000
-    private let lrclibRequestTimeout: TimeInterval = 4
-    private let playlistMetadataConcurrency = 3
 
-    private struct PlaylistPagePayload {
-        let title: String
-        let coverUrl: String?
-        let videos: [String]
-        let continuation: String?
-        let apiKey: String?
-        let context: [String: Any]?
-    }
-
-    private static let debugTimestampFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter
-    }()
-
-    private static let urlSession: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 45
-        config.timeoutIntervalForResource = 3600 // 1 hour background tolerance
-        config.waitsForConnectivity = true
+    /// Ephemeral (no shared cookie jar / cache): googlevideo answers 403 when
+    /// the www.youtube.com cookie jar is attached. 15 s idle / 45 s wall per
+    /// request; the first audio chunk also has a 12 s zero-byte watchdog.
+    static let urlSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.httpCookieStorage = nil
+        config.urlCache = nil
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 45
+        config.waitsForConnectivity = false
         return URLSession(configuration: config)
     }()
+
+    struct PlaylistChoice {
+        let videoId: String
+        let page: PlaylistPage
+        let job: DownloadJob
+    }
+
+    enum TrackOutcome {
+        case downloaded(songID: String, title: String)
+        case alreadyInLibrary(songID: String, title: String, lyricsAdded: Bool)
+        case failed(TrackFailure)
+    }
+
+    struct TrackFailure: Error {
+        var title: String?
+        let alertTitle: String
+        let message: String
+        let retryable: Bool
+
+        static let cancelled = TrackFailure(title: nil, alertTitle: "Cancelled", message: "The download was cancelled.", retryable: false)
+    }
 
     var body: some View {
         ScrollView {
@@ -95,13 +106,14 @@ struct DownloadView: View {
                         .textInputAutocapitalization(.never)
                         .accessibilityIdentifier("downloadUrlField")
 
-                    if !youtubeLink.isEmpty {
+                    if !youtubeLink.isEmpty && !isDownloading {
                         Button {
                             youtubeLink = ""
                         } label: {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundStyle(.secondary)
                         }
+                        .accessibilityLabel("Clear link")
                     }
                 }
                 .padding(14)
@@ -121,6 +133,7 @@ struct DownloadView: View {
                         .font(.subheadline)
                         .foregroundStyle(.green)
                 }
+                .disabled(isDownloading)
 
                 // Download status
                 if isDownloading || !statusMessage.isEmpty {
@@ -139,6 +152,29 @@ struct DownloadView: View {
                             Text("\(processedCount)/\(totalCount) tracks processed")
                                 .font(.caption.bold())
                                 .foregroundStyle(.green)
+                        }
+
+                        if !failedTrackTitles.isEmpty {
+                            failedTracksList
+                        }
+
+                        if !requests.queue.isEmpty {
+                            Text(requests.queue.count == 1 ? "1 more shared link queued" : "\(requests.queue.count) more shared links queued")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("downloadQueueCount")
+                        }
+
+                        if isDownloading {
+                            Button(role: .destructive) {
+                                cancelDownload()
+                            } label: {
+                                Label("Cancel", systemImage: "xmark.circle")
+                                    .font(.subheadline.bold())
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.red)
+                            .accessibilityIdentifier("cancelDownloadButton")
                         }
                     }
                     .padding(.horizontal, 16)
@@ -185,39 +221,7 @@ struct DownloadView: View {
                 .padding(.horizontal, 16)
 
                 if !debugLogLines.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text("Debug Log")
-                                .font(.subheadline.bold())
-                            Spacer()
-                            Button("Copy") {
-                                UIPasteboard.general.string = debugLogLines.joined(separator: "\n")
-                            }
-                            .font(.caption.bold())
-                            Button("Clear") {
-                                debugLogLines.removeAll()
-                            }
-                            .font(.caption.bold())
-                        }
-
-                        ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 6) {
-                                ForEach(Array(debugLogLines.suffix(60).enumerated()), id: \.offset) { _, line in
-                                    Text(line)
-                                        .font(.caption.monospaced())
-                                        .foregroundStyle(.secondary)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                }
-                            }
-                        }
-                        .frame(maxHeight: 220)
-                    }
-                    .padding(16)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(Color(UIColor.secondarySystemBackground))
-                    )
-                    .padding(.horizontal, 16)
+                    detailsSection
                 }
 
                 Spacer().frame(height: 100)
@@ -232,12 +236,40 @@ struct DownloadView: View {
             }
         }
         .alert(alertTitle, isPresented: $showAlert) {
-            Button("OK") { }
-            if alertTitle.contains("Error") {
+            if alertOffersRetry {
                 Button("Retry") { startDownload() }
+                Button("OK", role: .cancel) { }
+            } else {
+                Button("OK") { }
             }
         } message: {
             Text(alertMessage)
+        }
+        .confirmationDialog(
+            "This song is part of a playlist",
+            isPresented: $showPlaylistChoice,
+            titleVisibility: .visible,
+            presenting: playlistChoice
+        ) { choice in
+            Button("Just this song") { resolvePlaylistChoice(choice, wholePlaylist: false) }
+            Button("Whole playlist (\(choice.page.entries.count))") { resolvePlaylistChoice(choice, wholePlaylist: true) }
+            Button("Cancel", role: .cancel) {
+                playlistChoice = nil
+                cancelDownload()
+            }
+        } message: { choice in
+            Text("\"\(choice.page.title)\" has \(choice.page.entries.count) songs.")
+        }
+        .onChange(of: showPlaylistChoice) { _, isShown in
+            guard !isShown else { return }
+            // Dismissed by tapping outside: treat as Cancel. Button actions
+            // clear `playlistChoice` before this runs.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                if playlistChoice != nil {
+                    playlistChoice = nil
+                    cancelDownload()
+                }
+            }
         }
         .onTapGesture {
             linkFieldIsFocused = false
@@ -246,14 +278,91 @@ struct DownloadView: View {
             if dataManager.modelContext == nil {
                 dataManager.configure(with: environmentModelContext)
             }
+            startNextQueuedIfIdle()
+        }
+        .onChange(of: requests.queue.map(\.id)) { _, _ in
+            startNextQueuedIfIdle()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
-            guard isDownloading else { return }
-            beginBackgroundTaskIfNeeded()
+            // Under a running continued-processing task iOS keeps the app
+            // going, so later network errors are real errors, not suspension.
+            if !(backgroundActivity?.isContinuedRunning ?? false) {
+                activeJob?.noteBackgrounded()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
-            endBackgroundTask()
+            // The legacy background grant may have expired; re-arm it for the
+            // next trip to the background while the session is still running.
+            if activeJob != nil {
+                backgroundActivity?.rearmLegacyIfNeeded()
+            }
         }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            // Queued links wait for the foreground once background time is gone.
+            startNextQueuedIfIdle()
+        }
+    }
+
+    private var failedTracksList: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Failed (\(failedTrackTitles.count))")
+                .font(.caption.bold())
+                .foregroundStyle(.red)
+            ForEach(Array(failedTrackTitles.prefix(8).enumerated()), id: \.offset) { _, title in
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            if failedTrackTitles.count > 8 {
+                Text("and \(failedTrackTitles.count - 8) more")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var detailsSection: some View {
+        DisclosureGroup(isExpanded: $showDetails) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Spacer()
+                    Button("Copy") {
+                        UIPasteboard.general.string = debugLogLines.joined(separator: "\n")
+                    }
+                    .font(.caption.bold())
+                    Button("Clear") {
+                        debugLogLines.removeAll()
+                    }
+                    .font(.caption.bold())
+                }
+
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(debugLogLines.suffix(80).enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+                .frame(maxHeight: 220)
+            }
+            .padding(.top, 8)
+        } label: {
+            Text("Show details")
+                .font(.subheadline)
+                .foregroundStyle(Color.secondary)
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(UIColor.secondarySystemBackground))
+        )
+        .padding(.horizontal, 16)
+        .accessibilityIdentifier("downloadDetails")
     }
 
     private var canDownload: Bool {
@@ -275,434 +384,1648 @@ struct DownloadView: View {
         }
     }
 
-    // MARK: - Download Logic
+    // MARK: - Starting, cancelling, finishing
 
+    /// The Download button (and Retry): the link in the text field.
     func startDownload() {
-        let link = normalizeYouTubeLink(youtubeLink.trimmingCharacters(in: .whitespaces))
-        guard !link.isEmpty else { return }
-        let downloadToken = UUID()
+        startDownload(link: youtubeLink, choice: nil, requestID: nil)
+    }
 
+    /// `choice` comes from the share extension ("Just this song" / "Whole
+    /// playlist"); nil asks, as for a pasted link. `requestID` ties the job to
+    /// a queued `DownloadRequestCenter` request, which is finished with it.
+    private func startDownload(link rawLink: String, choice: SharedInbox.LinkRequest.Choice?, requestID: UUID?) {
+        guard !isDownloading else { return }
+        let link = rawLink.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !link.isEmpty else {
+            if let requestID { requests.finish(requestID) }
+            return
+        }
         linkFieldIsFocused = false
-        activeDownloadToken = downloadToken
-        youtubeLink = link
+
+        let kind = YouTubeLinkClassifier.classify(link)
+        if kind == .invalid {
+            statusMessage = "That doesn't look like a YouTube link."
+            presentAlert(title: "Invalid Link", message: "Paste a youtube.com, youtu.be or music.youtube.com link.", offerRetry: false)
+            if let requestID {
+                requests.finish(requestID)
+                DispatchQueue.main.async { startNextQueuedIfIdle() }
+            }
+            return
+        }
+
+        let job = beginJob(requestID: requestID)
+        switch kind {
+        case .video(let videoId):
+            debugLog("Start: single video \(videoId)")
+            launch(job) { await runSingle(videoId: videoId, job: job) }
+        case .playlist(let listId):
+            debugLog("Start: playlist \(listId)")
+            launch(job) { await runPlaylist(playlistId: listId, prefetched: nil, job: job) }
+        case .videoInPlaylist(let videoId, let listId, let isMix):
+            if isMix {
+                debugLog("Start: \(videoId) shared from mix \(listId); downloading just this song")
+                launch(job) { await runSingle(videoId: videoId, job: job) }
+            } else if choice == .song {
+                debugLog("Start: \(videoId) inside playlist \(listId); shared as just this song")
+                launch(job) { await runSingle(videoId: videoId, job: job) }
+            } else if choice == .playlist {
+                debugLog("Start: \(videoId) inside playlist \(listId); shared as the whole playlist")
+                launch(job) { await askSongOrPlaylist(videoId: videoId, playlistId: listId, preset: .playlist, job: job) }
+            } else {
+                debugLog("Start: \(videoId) inside playlist \(listId); asking song or playlist")
+                launch(job) { await askSongOrPlaylist(videoId: videoId, playlistId: listId, preset: nil, job: job) }
+            }
+        case .invalid:
+            break
+        }
+    }
+
+    /// Next queued shared link, when nothing else is running. In the
+    /// background a new job only starts under the session's existing grant.
+    private func startNextQueuedIfIdle() {
+        guard !isDownloading, activeJob == nil, playlistChoice == nil else { return }
+        guard requests.hasPending else {
+            endBackgroundActivity(success: true)
+            return
+        }
+        if UIApplication.shared.applicationState == .background && !(backgroundActivity?.isAlive ?? false) {
+            return
+        }
+        guard let request = requests.takeNext() else { return }
+        youtubeLink = request.link
+        startDownload(link: request.link, choice: request.choice, requestID: request.id)
+    }
+
+    private func beginJob(requestID: UUID? = nil) -> DownloadJob {
+        activeJob?.cancel()
+        let job = DownloadJob()
+        job.requestID = requestID
+        activeJob = job
         isDownloading = true
+        statusMessage = "Fetching video info…"
         downloadProgress = 0
         downloadedCount = 0
         skippedCount = 0
         totalCount = 0
-        targetPlaylistName = nil
-        targetPlaylistCover = nil
-        downloadedTrackTitles = []
         failedTrackTitles = []
         debugLogLines = []
-        debugLog("Start download for link: \(link)")
-        
-        // Refresh library state before checking duplicates
-        dataManager.syncFromFileSystem()
-
-        // Request notification auth
+        beginBackgroundActivity()
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-        
-        // Check if it's a playlist link
-        if isPlaylistLink(link) {
-            statusMessage = "🔍 Fetching playlist info…"
-            debugLog("Detected playlist link")
-            fetchPlaylistInfo(link: link, token: downloadToken)
-        } else if let videoId = extractVideoId(from: link) {
-            statusMessage = "🔍 Fetching video info…"
-            totalCount = 1
-            print("[DEBUG] Starting single video download: \(videoId)")
-            debugLog("Detected single video: \(videoId)")
-            fetchAndDownloadSingle(videoId: videoId, token: downloadToken)
+        DownloadTempFiles.sweepStale()
+        return job
+    }
+
+    private func launch(_ job: DownloadJob, _ operation: @escaping @MainActor () async -> Void) {
+        let task = Task { @MainActor in await operation() }
+        job.onCancel { task.cancel() }
+    }
+
+    private func isActive(_ job: DownloadJob) -> Bool {
+        activeJob === job && !job.isCancelled
+    }
+
+    enum CancelReason {
+        case user
+        /// iOS (or the user, from the system progress UI) stopped the
+        /// background continued-processing task.
+        case backgroundExpired
+    }
+
+    private func cancelDownload(reason: CancelReason = .user) {
+        guard let job = activeJob else { return }
+        job.cancel()
+        job.cleanupTemps()
+        activeJob = nil
+        playlistChoice = nil
+        isDownloading = false
+        let stopped = reason == .user ? "Cancelled" : "Stopped in the background"
+        if totalCount > 1 {
+            if let name = job.playlistName, !job.savedSongIDs.isEmpty {
+                addToAutoPlaylist(name: name, songIDs: job.savedSongIDs)
+            }
+            statusMessage = "\(stopped) after \(processedCount) of \(totalCount) tracks. \(downloadedCount) downloaded."
         } else {
-            print("[DEBUG] Invalid URL pasted: \(link)")
-            debugLog("Rejected invalid URL")
-            showError("Invalid URL", "Please paste a valid YouTube link.", token: downloadToken)
-            isDownloading = false
+            statusMessage = reason == .user ? "Download cancelled." : "Download stopped in the background."
+        }
+        debugLog("Cancelled (\(reason)): \(statusMessage)")
+        if downloadedCount > 0 {
+            NotificationCenter.default.post(name: .init("SongsFolderChanged"), object: nil)
+        }
+        if reason == .backgroundExpired {
+            sendCompletionNotification(message: statusMessage)
+        }
+        jobEnded(job, success: false)
+    }
+
+    private func finish(_ job: DownloadJob, message: String) {
+        guard isActive(job) else { return }
+        let inBackground = UIApplication.shared.applicationState != .active
+        debugLog("Finished\(inBackground ? " (app in background)" : ""): \(message)")
+        activeJob = nil
+        isDownloading = false
+        statusMessage = message
+        downloadProgress = 1
+        youtubeLink = ""
+        NotificationCenter.default.post(name: .init("SongsFolderChanged"), object: nil)
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        if !inBackground {
+            sendCompletionNotification(message: message)
+        } else {
+            sendCompletionNotification(message: BackgroundDownloadText.completionBody(
+                downloaded: downloadedCount, alreadyInLibrary: skippedCount, failed: failedTrackTitles.count,
+                singleTitle: totalCount == 1 ? job.currentTrackTitle : nil))
+        }
+        jobEnded(job, success: true)
+    }
+
+    /// Keeps `youtubeLink` so Retry downloads the same link again.
+    private func fail(_ job: DownloadJob, title: String, message: String, retry: Bool) {
+        guard isActive(job) else { return }
+        debugLog("Show error [\(title)]: \(message)")
+        activeJob = nil
+        isDownloading = false
+        statusMessage = "\(title): \(message)"
+        presentAlert(title: title, message: message, offerRetry: retry)
+        sendCompletionNotification(message: "\(title): \(message)")
+        jobEnded(job, success: false)
+    }
+
+    /// Every job ends here: the queued request leaves the inbox, and the
+    /// background session either carries over to the next queued link or ends.
+    private func jobEnded(_ job: DownloadJob, success: Bool) {
+        if let requestID = job.requestID {
+            requests.finish(requestID)
+        }
+        if requests.hasPending, let activity = backgroundActivity, activity.isAlive {
+            activity.prepareForNextRequest()
+        } else {
+            endBackgroundActivity(success: success)
+        }
+        DispatchQueue.main.async { startNextQueuedIfIdle() }
+    }
+
+    private func presentAlert(title: String, message: String, offerRetry: Bool) {
+        alertTitle = title
+        alertMessage = message
+        alertOffersRetry = offerRetry
+        showAlert = true
+    }
+
+    private func setStatus(_ job: DownloadJob, _ message: String) {
+        guard isActive(job) else { return }
+        statusMessage = message
+    }
+
+    private func setTrackProgress(_ job: DownloadJob, index: Int, count: Int, fraction: Double) {
+        guard isActive(job) else { return }
+        let value = DownloadProgressMath.overall(index: index, count: count, trackFraction: fraction)
+        if value > downloadProgress {
+            downloadProgress = value
+            backgroundActivity?.setFraction(value)
         }
     }
 
-    // MARK: - Single Video Download
+    /// Title/subtitle of the system progress UI (iOS 26+), refreshed when the
+    /// job learns its name and as tracks complete.
+    private func refreshBackgroundText(_ job: DownloadJob) {
+        guard isActive(job), let activity = backgroundActivity else { return }
+        activity.update(
+            title: BackgroundDownloadText.title(playlistName: job.playlistName, trackTitle: job.currentTrackTitle),
+            subtitle: BackgroundDownloadText.subtitle(processed: processedCount, total: totalCount, failed: failedTrackTitles.count)
+        )
+    }
 
-    func fetchAndDownloadSingle(videoId: String, token: UUID, retries: Int = 2) {
-        fetchYouTubeMetadata(videoId: videoId, retries: retries, token: token) { result in
-            switch result {
-            case .success(let meta):
-                self.debugLog("Metadata fetched for video \(videoId): \(meta.title)")
-                self.handleSingleVideoMetadata(meta, token: token)
-            case .failure(let error):
-                self.debugLog("Metadata fetch failed for \(videoId): \(error.message)")
-                self.showError("Video Unavailable", error.message, token: token)
+    // MARK: - Single video
+
+    private func runSingle(videoId: String, job: DownloadJob) async {
+        totalCount = 1
+        setStatus(job, "Fetching video info…")
+        let resolved = await resolveTrack(videoId: videoId, job: job)
+        guard isActive(job) else { return }
+        if case .success(let info) = resolved {
+            job.currentTrackTitle = displayTitle(info.title)
+            refreshBackgroundText(job)
+        }
+        let outcome = await processTrack(videoId: videoId, fallbackTitle: nil, resolved: resolved,
+                                         index: 0, count: 1, playlistCover: nil, job: job)
+        guard isActive(job) else { return }
+        switch outcome {
+        case .downloaded(_, let title):
+            downloadedCount = 1
+            finish(job, message: "Downloaded \"\(title)\".")
+        case .alreadyInLibrary(_, let title, let lyricsAdded):
+            skippedCount = 1
+            finish(job, message: lyricsAdded
+                   ? "\"\(title)\" is already in your library. Added its missing lyrics."
+                   : "\"\(title)\" is already in your library.")
+        case .failed(let failure):
+            fail(job, title: failure.alertTitle, message: failure.message, retry: failure.retryable)
+        }
+    }
+
+    // MARK: - Song vs playlist
+
+    /// `preset == .playlist` (chosen in the share sheet) skips the question;
+    /// a playlist that can't be listed still falls back to the song.
+    private func askSongOrPlaylist(videoId: String, playlistId: String, preset: SharedInbox.LinkRequest.Choice?,
+                                   job: DownloadJob) async {
+        setStatus(job, "Checking the playlist…")
+        let page: PlaylistPage?
+        do {
+            page = try await fetchPlaylist(playlistId: playlistId, job: job)
+        } catch {
+            guard isActive(job) else { return }
+            debugLog("Playlist lookup failed (\(error.localizedDescription)); downloading just the song")
+            page = nil
+        }
+        guard isActive(job) else { return }
+        guard let page, page.entries.count > 1 else {
+            await runSingle(videoId: videoId, job: job)
+            return
+        }
+        if preset == .playlist {
+            debugLog("Whole playlist chosen when shared (\(page.entries.count))")
+            await runPlaylist(playlistId: "", prefetched: page, job: job)
+            return
+        }
+        playlistChoice = PlaylistChoice(videoId: videoId, page: page, job: job)
+        statusMessage = "Download just this song, or the whole playlist?"
+        showPlaylistChoice = true
+    }
+
+    private func resolvePlaylistChoice(_ choice: PlaylistChoice, wholePlaylist: Bool) {
+        playlistChoice = nil
+        guard isActive(choice.job) else { return }
+        let job = choice.job
+        if wholePlaylist {
+            debugLog("User chose the whole playlist (\(choice.page.entries.count))")
+            launch(job) { await runPlaylist(playlistId: "", prefetched: choice.page, job: job) }
+        } else {
+            debugLog("User chose just this song")
+            launch(job) { await runSingle(videoId: choice.videoId, job: job) }
+        }
+    }
+
+    // MARK: - Playlist
+
+    private func runPlaylist(playlistId: String, prefetched: PlaylistPage?, job: DownloadJob) async {
+        setStatus(job, "Fetching playlist info…")
+        let page: PlaylistPage
+        if let prefetched {
+            page = prefetched
+        } else {
+            do {
+                page = try await fetchPlaylist(playlistId: playlistId, job: job)
+            } catch {
+                guard isActive(job) else { return }
+                fail(job, title: "Playlist Error", message: "Couldn't read this playlist: \(error.localizedDescription)", retry: true)
+                return
             }
         }
-    }
-
-    private func fetchYouTubeMetadata(videoId: String, retries: Int, token: UUID, completion: @escaping (Result<VideoInfo, DownloadError>) -> Void) {
-        guard isActiveDownload(token) else {
-            completion(.failure(DownloadError(message: "Download was cancelled.")))
+        guard isActive(job) else { return }
+        guard !page.entries.isEmpty else {
+            fail(job, title: "Playlist Error", message: "This playlist is empty, private, or an auto-generated mix that can't be listed.", retry: false)
             return
         }
 
-        // Prefer the watch page + Innertube endpoint path first because YouTube often blocks /get_video_info in the app environment.
-        fetchYouTubeMetadataFromWatchPage(videoId: videoId, token: token) { result in
-            switch result {
-            case .success:
-                completion(result)
-            case .failure:
-                if retries > 0 {
-                    self.debugLog("Watch page metadata parse failed, retrying legacy endpoint for \(videoId)")
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                        self.fetchYouTubeMetadataFromLegacyEndpoint(videoId: videoId, retries: retries - 1, token: token, completion: completion)
-                    }
-                    return
-                }
-                self.fetchYouTubeMetadataFromLegacyEndpoint(videoId: videoId, retries: 0, token: token, completion: completion)
+        let entries = page.entries
+        totalCount = entries.count
+        job.playlistName = page.title
+        refreshBackgroundText(job)
+        debugLog("Downloading playlist \"\(page.title)\": \(entries.count) tracks")
+
+        var nextResolve: Task<Result<VideoInfo, TrackFailure>, Never>? = nil
+        for (index, entry) in entries.enumerated() {
+            guard isActive(job) else { break }
+            setStatus(job, "(\(index + 1)/\(entries.count)) \(entry.title ?? "Fetching track info…")")
+            sendProgressNotification(message: "Downloading \(index + 1) of \(entries.count)\n\(entry.title ?? entry.videoId)")
+
+            let resolved: Result<VideoInfo, TrackFailure>
+            if let pending = nextResolve {
+                resolved = await pending.value
+            } else {
+                resolved = await resolveTrack(videoId: entry.videoId, job: job)
             }
+            nextResolve = nil
+            guard isActive(job) else { break }
+
+            // Resolve the next track while this one downloads.
+            if index + 1 < entries.count {
+                let nextID = entries[index + 1].videoId
+                let task = Task { @MainActor in await resolveTrack(videoId: nextID, job: job) }
+                job.onCancel { task.cancel() }
+                nextResolve = task
+            }
+
+            let outcome = await processTrack(videoId: entry.videoId, fallbackTitle: entry.title, resolved: resolved,
+                                             index: index, count: entries.count, playlistCover: page.coverUrl, job: job)
+            guard isActive(job) else { break }
+            switch outcome {
+            case .downloaded(let songID, _):
+                downloadedCount += 1
+                job.savedSongIDs.append(songID)
+            case .alreadyInLibrary(let songID, let title, _):
+                skippedCount += 1
+                job.savedSongIDs.append(songID)
+                debugLog("Already in library: \(title)")
+            case .failed(let failure):
+                let title = failure.title ?? entry.title ?? entry.videoId
+                failedTrackTitles.append(title)
+                debugLog("Track failed: \(title): \(failure.message)")
+            }
+            refreshBackgroundText(job)
+        }
+        nextResolve?.cancel()
+        guard isActive(job) else { return }
+
+        addToAutoPlaylist(name: page.title, songIDs: job.savedSongIDs)
+        if downloadedCount == 0 && skippedCount == 0 {
+            fail(job, title: "Playlist Failed", message: "None of the \(entries.count) tracks could be downloaded.", retry: true)
+        } else {
+            finish(job, message: playlistSummary())
         }
     }
 
-    private func fetchYouTubeMetadataFromLegacyEndpoint(videoId: String, retries: Int, token: UUID, completion: @escaping (Result<VideoInfo, DownloadError>) -> Void) {
-        guard isActiveDownload(token) else {
-            completion(.failure(DownloadError(message: "Download was cancelled.")))
-            return
+    private func playlistSummary() -> String {
+        let failed = failedTrackTitles.count
+        if failed == 0 && skippedCount == 0 {
+            return "Playlist complete: \(downloadedCount) tracks downloaded."
         }
+        var parts = ["\(downloadedCount) downloaded"]
+        if skippedCount > 0 { parts.append("\(skippedCount) already in library") }
+        if failed > 0 { parts.append("\(failed) failed") }
+        return "Playlist finished: " + parts.joined(separator: ", ") + "."
+    }
 
-        guard var components = URLComponents(string: "https://www.youtube.com/get_video_info") else {
-            completion(.failure(DownloadError(message: "Invalid metadata endpoint.")))
-            return
-        }
+    private func fetchPlaylist(playlistId: String, job: DownloadJob) async throws -> PlaylistPage {
+        var components = URLComponents(string: "https://www.youtube.com/playlist")!
         components.queryItems = [
-            URLQueryItem(name: "video_id", value: videoId),
-            URLQueryItem(name: "el", value: "embedded"),
-            URLQueryItem(name: "ps", value: "default"),
-            URLQueryItem(name: "eurl", value: ""),
+            URLQueryItem(name: "list", value: playlistId),
             URLQueryItem(name: "hl", value: "en"),
-            URLQueryItem(name: "gl", value: "US")
+            URLQueryItem(name: "gl", value: "US"),
         ]
-
-        guard let url = components.url else {
-            completion(.failure(DownloadError(message: "Could not build metadata URL.")))
-            return
-        }
-
-        debugLog("Requesting legacy video metadata for \(videoId)")
-        var request = URLRequest(url: url)
-        request.setValue(youtubeUserAgent, forHTTPHeaderField: "User-Agent")
+        var request = URLRequest(url: components.url!)
+        request.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 20
 
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            guard self.isActiveDownload(token) else { return }
-
-            if let error {
-                if retries > 0 {
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                        self.fetchYouTubeMetadataFromLegacyEndpoint(videoId: videoId, retries: retries - 1, token: token, completion: completion)
-                    }
-                } else {
-                    completion(.failure(DownloadError(message: error.localizedDescription)))
+        var firstPage: PlaylistPageParser.FirstPage?
+        var lastError: Error = DownloadError(message: "The playlist page couldn't be read.")
+        for attempt in 1...2 {
+            try Task.checkCancellation()
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                if let html = String(data: data, encoding: .utf8),
+                   let parsed = PlaylistPageParser.firstPage(fromHTML: html) {
+                    firstPage = parsed
+                    break
                 }
-                return
+                debugLog("Playlist page not parseable (HTTP \(code), attempt \(attempt))")
+            } catch let error as URLError where error.code != .cancelled {
+                lastError = error
+                debugLog("Playlist page request failed: \(error.localizedDescription) (attempt \(attempt))")
             }
+            if attempt == 1 { try await Task.sleep(nanoseconds: 1_500_000_000) }
+        }
+        guard let firstPage else { throw lastError }
 
-            guard let data,
-                  let payload = String(data: data, encoding: .utf8) else {
-                completion(.failure(DownloadError(message: "Could not read YouTube metadata response.")))
-                return
-            }
-            guard
-                let queryItems = self.parseQueryString(payload),
-                let playerJSON = queryItems["player_response"]?.removingPercentEncoding,
-                let playerData = playerJSON.data(using: .utf8),
-                let playerObject = try? JSONSerialization.jsonObject(with: playerData),
-                let playerDict = playerObject as? [String: Any],
-                let meta = self.videoInfo(from: playerDict, videoId: videoId)
-            else {
-                if retries > 0 {
-                    self.debugLog("Legacy metadata parse failed, retrying for \(videoId)")
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                        self.fetchYouTubeMetadataFromLegacyEndpoint(videoId: videoId, retries: retries - 1, token: token, completion: completion)
-                    }
-                } else {
-                    completion(.failure(DownloadError(message: "Could not parse video metadata.")))
-                }
-                return
-            }
-
-            DispatchQueue.main.async {
-                completion(.success(meta))
-            }
-        }.resume()
-    }
-
-    private func fetchYouTubeMetadataFromWatchPage(videoId: String, token: UUID, completion: @escaping (Result<VideoInfo, DownloadError>) -> Void) {
-        guard let url = URL(string: "https://www.youtube.com/watch?v=\(videoId)&bpctr=9999999999&has_verified=1&hl=en&gl=US") else {
-            completion(.failure(DownloadError(message: "Could not build watch page URL.")))
-            return
+        var seen = Set<String>()
+        var entries: [PlaylistEntry] = []
+        for entry in firstPage.entries where seen.insert(entry.videoId).inserted {
+            entries.append(entry)
         }
 
-        var request = URLRequest(url: url)
-        request.setValue(youtubeUserAgent, forHTTPHeaderField: "User-Agent")
-        request.timeoutInterval = 20
-
-        URLSession.shared.dataTask(with: request) { data, _, error in
-            guard self.isActiveDownload(token) else { return }
-            if let error {
-                completion(.failure(DownloadError(message: error.localizedDescription)))
-                return
+        var token = firstPage.continuation
+        var seenTokens = Set<String>()
+        var pages = 1
+        while let current = token, !current.isEmpty, seenTokens.insert(current).inserted, pages < 50,
+              let apiKey = firstPage.apiKey {
+            try Task.checkCancellation()
+            guard let payload = await fetchBrowseContinuation(apiKey: apiKey, context: firstPage.context, token: current) else { break }
+            let contents = PlaylistPageParser.continuationContents(fromBrowse: payload)
+            let more = PlaylistPageParser.entries(from: contents)
+            for entry in more where seen.insert(entry.videoId).inserted {
+                entries.append(entry)
             }
-
-            guard let data, let html = String(data: data, encoding: .utf8) else {
-                completion(.failure(DownloadError(message: "Could not parse watch page response.")))
-                return
-            }
-
-            let watchPagePlayerData = self.extractYouTubeJSON(from: html, marker: "ytInitialPlayerResponse = ")
-                ?? self.extractYouTubeJSON(from: html, marker: "ytInitialPlayerResponse={")
-                ?? self.extractYouTubeJSON(from: html, marker: "window[\"ytInitialPlayerResponse\"] = ")
-
-            if let playerData = watchPagePlayerData,
-               let meta = self.videoInfo(from: playerData, videoId: videoId) {
-                self.debugLog("Watch page metadata parsed for \(videoId) from ytInitialPlayerResponse")
-                completion(.success(meta))
-                return
-            }
-
-            // Extract captions from the watch page even though audio parsing failed.
-            // Innertube mobile clients (IOS, ANDROID_VR) often omit captions data,
-            // so we carry these forward and merge them into the Innertube result.
-            let watchPageSubtitles = watchPagePlayerData.map { self.extractSubtitleUrls(from: $0) } ?? [:]
-            if !watchPageSubtitles.isEmpty {
-                self.debugLog("Extracted \(watchPageSubtitles.count) subtitle tracks from watch page for \(videoId) (audio parse failed, will merge into Innertube result)")
-            }
-
-            self.debugLog("Watch page ytInitialPlayerResponse parse failed for \(videoId), attempting Innertube fallback")
-
-            let mergeSubtitles = { (meta: VideoInfo) -> VideoInfo in
-                guard !watchPageSubtitles.isEmpty else { return meta }
-                let existing = meta.subtitleUrls ?? [:]
-                if !existing.isEmpty { return meta }
-                self.debugLog("Merging \(watchPageSubtitles.count) watch page subtitle tracks into Innertube result for \(videoId)")
-                return VideoInfo(
-                    id: meta.id,
-                    title: meta.title,
-                    artist: meta.artist,
-                    album: meta.album,
-                    duration: meta.duration,
-                    language: meta.language,
-                    audioUrl: meta.audioUrl,
-                    coverUrl: meta.coverUrl,
-                    subtitleUrls: watchPageSubtitles
-                )
-            }
-
-            guard let apiKey = self.extractInnertubeAPIKey(from: html) else {
-                completion(.failure(DownloadError(message: "Could not extract YouTube API key from page.")))
-                return
-            }
-
-            let context = self.extractInnertubeContext(from: html)
-            let signatureTimestamp = self.extractInnertubeSignatureTimestamp(from: html)
-
-            if let signatureTimestamp {
-                let androidVRContext = self.buildAndroidVRClientContext(from: context)
-                let fallbackAttempts: [(name: String, context: [String: Any]?, signatureTimestamp: Int?, includeParams: Bool)] = [
-                    (name: "android_vr", context: androidVRContext, signatureTimestamp: signatureTimestamp, includeParams: false),
-                    (name: "ios_with_params", context: context, signatureTimestamp: signatureTimestamp, includeParams: true),
-                    (name: "ios_without_params", context: context, signatureTimestamp: signatureTimestamp, includeParams: false),
-                    (name: "android_vr_without_sts", context: androidVRContext, signatureTimestamp: nil, includeParams: false)
-                ]
-
-                func tryAttempt(_ index: Int) {
-                    guard self.isActiveDownload(token) else {
-                        completion(.failure(DownloadError(message: "Download was cancelled.")))
-                        return
-                    }
-
-                    if index >= fallbackAttempts.count {
-                        completion(.failure(DownloadError(message: "Could not fetch playable stream metadata.")))
-                        return
-                    }
-
-                    let attempt = fallbackAttempts[index]
-                    self.debugLog("Trying INNERTUBE path: \(attempt.name), params=\(attempt.includeParams), sts=\(attempt.signatureTimestamp.map { String($0) } ?? "nil")")
-                    self.fetchYouTubeMetadataFromInnertube(
-                        videoId: videoId,
-                        apiKey: apiKey,
-                        context: attempt.context,
-                        signatureTimestamp: attempt.signatureTimestamp,
-                        includeParams: attempt.includeParams,
-                        token: token
-                    ) { result in
-                        switch result {
-                        case .success(let metadata):
-                            completion(.success(mergeSubtitles(metadata)))
-                        case .failure(let error):
-                            self.debugLog("INNERTUBE path \(attempt.name) failed for \(videoId): \(error.message)")
-                            tryAttempt(index + 1)
-                        }
-                    }
-                }
-
-                tryAttempt(0)
-                return
-            }
-
-            self.fetchYouTubeMetadataFromInnertube(
-                videoId: videoId,
-                apiKey: apiKey,
-                context: context,
-                token: token
-            ) { result in
-                switch result {
-                case .success(let metadata):
-                    completion(.success(mergeSubtitles(metadata)))
-                case .failure:
-                    completion(result)
-                }
-            }
-        }.resume()
-    }
-
-    private func fetchYouTubeMetadataFromInnertube(
-        videoId: String,
-        apiKey: String,
-        context: [String: Any]? = nil,
-        signatureTimestamp: Int? = nil,
-        includeParams: Bool = true,
-        token: UUID,
-        completion: @escaping (Result<VideoInfo, DownloadError>) -> Void
-    ) {
-        guard let url = URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false") else {
-            completion(.failure(DownloadError(message: "Could not build player API URL.")))
-            return
+            token = PlaylistPageParser.continuationToken(from: contents)
+            pages += 1
+            debugLog("Playlist continuation page \(pages): \(more.count) entries")
         }
 
-        let clientContext = context ?? [
-            "client": [
-                "clientName": "IOS",
-                "clientVersion": "19.09.0",
-                "platform": "MOBILE",
-                "hl": "en",
-                "gl": "US"
-            ]
-        ]
+        let title = firstPage.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let page = PlaylistPage(title: title.isEmpty ? "Playlist" : title, coverUrl: firstPage.coverUrl, entries: entries)
+        debugLog("Playlist \"\(page.title)\": \(entries.count) unique entries across \(pages) page(s)")
+        return page
+    }
 
-        let clientDict = clientContext["client"] as? [String: Any] ?? [:]
-        let clientName = (clientDict["clientName"] as? String) ?? "IOS"
-        let clientVersion = (clientDict["clientVersion"] as? String) ?? "19.09.0"
-        let userAgentForClient = (clientDict["userAgent"] as? String) ?? youtubeUserAgent
-        let visitorData = clientDict["visitorData"] as? String
-
+    private func fetchBrowseContinuation(apiKey: String, context: [String: Any]?, token: String) async -> [String: Any]? {
+        guard let url = URL(string: "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false&key=\(apiKey)") else { return nil }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(userAgentForClient, forHTTPHeaderField: "User-Agent")
-        request.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
-        request.setValue("https://www.youtube.com/watch?v=\(videoId)", forHTTPHeaderField: "Referer")
-        request.setValue(innertubeClientNumber(for: clientName), forHTTPHeaderField: "X-Youtube-Client-Name")
-        request.setValue(clientVersion, forHTTPHeaderField: "X-Youtube-Client-Version")
-        if let visitorData, !visitorData.isEmpty {
-            request.setValue(visitorData, forHTTPHeaderField: "X-Goog-Visitor-Id")
-        }
         request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
+        request.setValue("https://www.youtube.com", forHTTPHeaderField: "Referer")
+        // The header must match the context's client version: an old
+        // hard-coded version is answered with HTTP 400.
+        let clientVersion = ((context?["client"] as? [String: Any])?["clientVersion"] as? String) ?? "2.20260922.01.00"
+        request.setValue("1", forHTTPHeaderField: "X-Youtube-Client-Name")
+        request.setValue(clientVersion, forHTTPHeaderField: "X-Youtube-Client-Version")
+        let browseContext = context ?? [
+            "client": [
+                "clientName": "WEB",
+                "clientVersion": clientVersion,
+                "hl": "en",
+                "gl": "US",
+            ] as [String: Any],
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "context": browseContext,
+            "continuation": token,
+        ])
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard (200..<300).contains(code),
+                  let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                debugLog("Playlist continuation failed: HTTP \(code)")
+                return nil
+            }
+            return payload
+        } catch {
+            debugLog("Playlist continuation failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
 
-        var payload: [String: Any] = [
-            "context": clientContext,
-            "videoId": videoId,
-            "racyCheckOk": true,
-            "contentCheckOk": true
-        ] as [String: Any]
+    // MARK: - One track
 
-        if let signatureTimestamp {
-            payload["playbackContext"] = [
-                "contentPlaybackContext": [
-                    "html5Preference": "HTML5_PREF_WANTS",
-                    "signatureTimestamp": signatureTimestamp
-                ]
-            ]
+    private func resolveTrack(videoId: String, job: DownloadJob) async -> Result<VideoInfo, TrackFailure> {
+        do {
+            let (info, client) = try await YouTubeClient.shared.resolveAudio(
+                videoId: videoId, log: backgroundLogger(prefix: "Resolve \(videoId) "))
+            debugLog("Resolved \(videoId) via \(client): \(info.captionTracks.count) caption tracks, language \(info.language ?? "unknown")")
+            return .success(info)
+        } catch let error as YouTubeFetchError {
+            debugLog("Resolve failed for \(videoId): \(error.message)")
+            let title: String
+            switch error.kind {
+            case .offline: title = "You're Offline"
+            case .unavailable: title = "Video Unavailable"
+            case .blocked: title = "Blocked by YouTube"
+            case .unsupportedFormat: title = "Unsupported Format"
+            case .network: title = "Network Error"
+            case .other: title = "Download Failed"
+            }
+            let retry = error.kind != .unavailable && error.kind != .unsupportedFormat
+            return .failure(TrackFailure(title: nil, alertTitle: title, message: error.message, retryable: retry))
+        } catch {
+            return .failure(.cancelled)
+        }
+    }
+
+    private func processTrack(videoId: String, fallbackTitle: String?, resolved: Result<VideoInfo, TrackFailure>,
+                              index: Int, count: Int, playlistCover: String?, job: DownloadJob) async -> TrackOutcome {
+        defer { job.cleanupTemps() }
+
+        let meta: VideoInfo
+        switch resolved {
+        case .failure(var failure):
+            failure.title = failure.title ?? fallbackTitle ?? videoId
+            return .failed(failure)
+        case .success(let info):
+            meta = info
         }
 
-        if includeParams {
-            payload["params"] = "8AEB"
+        let title = displayTitle(meta.title)
+        let prefix = count > 1 ? "(\(index + 1)/\(count)) " : ""
+        setTrackProgress(job, index: index, count: count, fraction: DownloadProgressMath.resolvedFraction)
+        setStatus(job, "\(prefix)Downloading \"\(title)\"…")
+        if count == 1 { sendProgressNotification(message: "Downloading: \(title)") }
+
+        // Already in the library? Only fill in missing lyrics.
+        if let existingID = libraryMatch(for: meta, job: job) {
+            debugLog("Already in library: \(title) [\(existingID)]")
+            let lyricsAdded = await addMissingLyricsIfNeeded(songID: existingID, meta: meta, job: job)
+            setTrackProgress(job, index: index, count: count, fraction: 1)
+            return .alreadyInLibrary(songID: existingID, title: title, lyricsAdded: lyricsAdded)
         }
 
-        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+        // Cover (track thumbnail, else the playlist's cover).
+        let coverString = !meta.coverUrl.isEmpty ? meta.coverUrl : (playlistCover ?? "")
+        var coverTemp: URL? = nil
+        if !coverString.isEmpty, let coverURL = URL(string: coverString) {
+            coverTemp = await downloadSmallFile(from: coverURL, kind: .image, job: job)
+        }
+        guard isActive(job) else { return .failed(.cancelled) }
+        setTrackProgress(job, index: index, count: count, fraction: DownloadProgressMath.coverFraction)
 
-        if let cookies = HTTPCookieStorage.shared.cookies(for: url) {
-            let cookieNames = cookies.map { $0.name }.joined(separator: ",")
-            debugLog("Innertube cookies (\(cookies.count)) names=\(cookieNames) clientName=\(clientName) visitor=\(visitorData != nil)")
+        // Audio.
+        guard let audioURL = URL(string: meta.audioUrl) else {
+            return .failed(TrackFailure(title: title, alertTitle: "Download Failed", message: "YouTube returned an invalid audio URL.", retryable: true))
+        }
+        let audioTemp: URL
+        do {
+            audioTemp = try await downloadAudio(from: audioURL, job: job) { fraction in
+                setTrackProgress(job, index: index, count: count, fraction: DownloadProgressMath.audioFraction(fraction))
+            }
+        } catch let error as AudioDownloadError {
+            if error == .cancelled { return .failed(.cancelled) }
+            debugLog("Audio failed for \(title): \(error.logDescription)")
+            return .failed(TrackFailure(title: title, alertTitle: error.alertTitle, message: error.userMessage, retryable: error.isRetryable))
+        } catch {
+            return .failed(TrackFailure(title: title, alertTitle: "Download Failed", message: error.localizedDescription, retryable: true))
+        }
+        guard isActive(job) else { return .failed(.cancelled) }
+        setTrackProgress(job, index: index, count: count, fraction: DownloadProgressMath.audioDoneFraction)
+
+        // Captions (original language + English) and LRCLIB lyrics.
+        setStatus(job, "\(prefix)Fetching lyrics for \"\(title)\"…")
+        let lyricFiles = await fetchLyricFiles(for: meta, skip: [], job: job)
+        guard isActive(job) else { return .failed(.cancelled) }
+        setTrackProgress(job, index: index, count: count, fraction: DownloadProgressMath.lyricsFraction)
+
+        // Save to Documents/Songs/<videoId>/ off the main thread, then index
+        // only this folder.
+        let folderID = stableID(for: meta)
+        let logger = backgroundLogger()
+        do {
+            let saved = try await Task.detached(priority: .userInitiated) {
+                try SongFileSaver.save(folderID: folderID, meta: meta, cover: coverTemp, audio: audioTemp,
+                                       subtitles: lyricFiles, log: logger)
+            }.value
+            indexSavedSong(saved, meta: meta, job: job)
+            setTrackProgress(job, index: index, count: count, fraction: 1)
+            debugLog("Saved \(title) [\(saved.folderID)] with \(lyricFiles.count) lyric file(s)")
+            return .downloaded(songID: saved.folderID, title: title)
+        } catch {
+            debugLog("Save failed for \(title): \(error.localizedDescription)")
+            return .failed(TrackFailure(title: title, alertTitle: "Save Error", message: "The song couldn't be saved: \(error.localizedDescription)", retryable: true))
+        }
+    }
+
+    private func downloadAudio(from url: URL, job: DownloadJob, progress: @escaping @MainActor (Double) -> Void) async throws -> URL {
+        let dest = DownloadTempFiles.newURL(ext: "m4a")
+        job.trackTemp(dest)
+        debugLog("Starting chunked audio download host=\(url.host ?? "?")")
+        let downloader = ChunkedAudioDownloader(
+            session: Self.urlSession,
+            userAgent: YouTubeClient.safariUserAgent,
+            log: backgroundLogger(),
+            wasBackgrounded: { job.wasBackgrounded }
+        )
+        _ = try await downloader.download(from: url, to: dest) { done, total in
+            guard let total, total > 0 else { return }
+            let fraction = Double(done) / Double(total)
+            Task { @MainActor in progress(fraction) }
+        }
+        return dest
+    }
+
+    enum SmallFileKind {
+        case image
+        case subtitle
+    }
+
+    /// Covers are tiny; one data request, validated, written to a tracked temp file.
+    private func downloadSmallFile(from url: URL, kind: SmallFileKind, job: DownloadJob) async -> URL? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        request.setValue(YouTubeClient.safariUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(kind == .image ? "image/avif,image/webp,image/*,*/*;q=0.8" : "text/vtt,*/*;q=0.8",
+                         forHTTPHeaderField: "Accept")
+        do {
+            let (data, response) = try await Self.urlSession.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                debugLog("Cover request failed: HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")
+                return nil
+            }
+            let mime = http.mimeType?.lowercased() ?? ""
+            guard mime.hasPrefix("image/"), data.count >= 5_000 else {
+                debugLog("Cover rejected (\(mime), \(data.count) bytes)")
+                return nil
+            }
+            let ext = mime.contains("png") ? "png" : mime.contains("webp") ? "webp" : "jpg"
+            let dest = DownloadTempFiles.newURL(ext: ext)
+            job.trackTemp(dest)
+            try data.write(to: dest, options: .atomic)
+            return dest
+        } catch {
+            if !job.isCancelled { debugLog("Cover download failed: \(error.localizedDescription)") }
+            return nil
+        }
+    }
+
+    private func fetchLyricFiles(for meta: VideoInfo, skip: Set<String>, job: DownloadJob) async -> [(lang: String, vtt: String)] {
+        let result = await LyricsFetcher.fetchLyricFiles(
+            captions: meta.captionTracks,
+            language: meta.language,
+            title: meta.title,
+            artist: meta.artist,
+            duration: meta.duration ?? 0,
+            skipLanguages: skip,
+            includeLRCLIB: job.lrclibNetworkFailures < 2 && !skip.contains("lyrics"),
+            log: backgroundLogger()
+        )
+        if result.lrclibAttempted {
+            job.lrclibNetworkFailures = result.lrclibNetworkFailed ? job.lrclibNetworkFailures + 1 : 0
+            if job.lrclibNetworkFailures == 2 { debugLog("LRCLIB unreachable twice in a row; skipping it for the rest of this download") }
+        }
+        return result.files
+    }
+
+    // MARK: - Library bookkeeping
+
+    private func stableID(for meta: VideoInfo) -> String {
+        meta.id.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func displayTitle(_ title: String) -> String {
+        title.replacingOccurrences(of: "/", with: "-")
+            .precomposedStringWithCanonicalMapping
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Built once per job from the store and the Songs folder names (no
+    /// folder contents are read), updated as tracks are saved.
+    private func ensureLibraryIndexes(_ job: DownloadJob) {
+        if job.libraryIndex == nil {
+            var index: [String: String] = [:]
+            for song in dataManager.fetchAllSongs() {
+                index[LibraryKey.id(song.id)] = song.id
+                let key = LibraryKey.titleArtist(song.title, song.artist)
+                if index[key] == nil { index[key] = song.id }
+            }
+            job.libraryIndex = index
+        }
+        if job.folderIndex == nil {
+            var folders: [String: String] = [:]
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: SongFileSaver.songsDirectory.path)) ?? []
+            for name in names where !name.hasPrefix(".") {
+                folders[LibraryKey.folder(name)] = name
+            }
+            job.folderIndex = folders
+        }
+    }
+
+    /// The id of the matching playable song already in the library, if any.
+    private func libraryMatch(for meta: VideoInfo, job: DownloadJob) -> String? {
+        ensureLibraryIndexes(job)
+        let stable = stableID(for: meta)
+        let candidates = [
+            job.libraryIndex?[LibraryKey.id(stable)],
+            job.libraryIndex?[LibraryKey.titleArtist(meta.title, meta.artist ?? "Unknown Artist")],
+        ].compactMap { $0 }
+        for songID in candidates where songIsPlayable(id: songID) {
+            return songID
+        }
+        // On disk but not in the store (store lost or reset): index it now.
+        if folderHasPlayableAudio(stable) {
+            dataManager.syncSingleSong(folderName: stable)
+            job.libraryIndex?[LibraryKey.id(stable)] = stable
+            return stable
+        }
+        if let artist = meta.artist,
+           let legacy = job.folderIndex?[LibraryKey.folder("\(artist) - \(meta.title)")],
+           folderHasPlayableAudio(legacy) {
+            dataManager.syncSingleSong(folderName: legacy)
+            return legacy
+        }
+        return nil
+    }
+
+    private func songIsPlayable(id: String) -> Bool {
+        guard let ctx = dataManager.modelContext else { return folderHasPlayableAudio(id) }
+        let descriptor = FetchDescriptor<SongData>(predicate: #Predicate { $0.id == id })
+        guard let song = (try? ctx.fetch(descriptor))?.first else { return false }
+        return PlayableLocalAudio.isPlayable(at: song.audioFileURL)
+    }
+
+    private func folderHasPlayableAudio(_ folderName: String) -> Bool {
+        let dir = SongFileSaver.songsDirectory.appendingPathComponent(folderName.precomposedStringWithCanonicalMapping)
+        guard let contents = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
+            return false
+        }
+        return contents.contains { PlayableLocalAudio.isPlayable(at: $0) }
+    }
+
+    /// Re-downloading a song that exists: fetch lyrics if the folder has none.
+    private func addMissingLyricsIfNeeded(songID: String, meta: VideoInfo, job: DownloadJob) async -> Bool {
+        let folder = SongFileSaver.songsDirectory.appendingPathComponent(songID)
+        guard FileManager.default.fileExists(atPath: folder.path) else { return false }
+        if songID == stableID(for: meta), SongFolderMetadata.read(from: folder) == nil {
+            try? SongFileSaver.metadata(for: meta).write(to: folder)
+        }
+        guard !LyricsFetcher.folderHasSubtitles(folder) else { return false }
+        setStatus(job, "Adding missing lyrics for \"\(displayTitle(meta.title))\"…")
+        let files = await fetchLyricFiles(for: meta, skip: [], job: job)
+        guard isActive(job), !files.isEmpty else { return false }
+        var wrote = false
+        for file in files {
+            let dest = folder.appendingPathComponent("\(songID).\(file.lang).vtt")
+            if FileManager.default.fileExists(atPath: dest.path) { continue }
+            do {
+                try file.vtt.write(to: dest, atomically: true, encoding: .utf8)
+                wrote = true
+            } catch {
+                debugLog("Couldn't write \(dest.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+        if wrote {
+            Song.invalidateSubtitleCache(forFolder: folder)
+            dataManager.syncSingleSong(folderName: songID)
+            debugLog("Added \(files.count) lyric file(s) to existing song \(songID)")
+        }
+        return wrote
+    }
+
+    /// Index just the saved folder (no full library scan) so it shows up in
+    /// Library right away, and make the row carry the real metadata.
+    private func indexSavedSong(_ saved: SongFileSaver.SavedSong, meta: VideoInfo, job: DownloadJob) {
+        let folderID = saved.folderID
+        dataManager.syncSingleSong(folderName: folderID)
+        if let ctx = dataManager.modelContext {
+            let descriptor = FetchDescriptor<SongData>(predicate: #Predicate { $0.id == folderID })
+            if let song = (try? ctx.fetch(descriptor))?.first {
+                song.title = meta.title
+                song.artist = meta.artist ?? "Unknown Artist"
+                if let album = meta.album { song.albumTitle = album }
+                if let duration = meta.duration, duration > 0 { song.duration = duration }
+                try? ctx.save()
+            } else {
+                debugLog("Saved \(folderID) but it isn't playable yet, so it wasn't indexed")
+            }
         } else {
-            debugLog("Innertube no cookies in shared storage for url")
+            debugLog("Library store unavailable; \(folderID) will appear after the next library sync")
         }
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            guard self.isActiveDownload(token) else { return }
-
-            if let error {
-                self.debugLog("Innertube request failed for \(videoId): \(error.localizedDescription)")
-                completion(.failure(DownloadError(message: error.localizedDescription)))
-                return
-            }
-
-            guard
-                let http = response as? HTTPURLResponse,
-                (200..<300).contains(http.statusCode)
-            else {
-                let statusText = (response as? HTTPURLResponse).map { "\($0.statusCode)" } ?? "unknown status"
-                let details = String(data: data ?? Data(), encoding: .utf8) ?? ""
-                self.debugLog("Innertube request failed for \(videoId): HTTP \(statusText)")
-                completion(.failure(DownloadError(message: "Could not fetch Innertube metadata. \(statusText) \(details)")))
-                return
-            }
-
-            guard
-                let data,
-                let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else {
-                self.debugLog("Innertube response parse failed for \(videoId).")
-                completion(.failure(DownloadError(message: "Could not parse Innertube response."))
-                )
-                return
-            }
-
-            if let playability = payload["playabilityStatus"] as? [String: Any],
-               let status = playability["status"] as? String,
-               status != "OK" {
-                let reason = (playability["reason"] as? String) ?? "Unknown reason."
-                self.debugLog("Innertube playability blocked for \(videoId): \(status)")
-                completion(.failure(DownloadError(message: "YouTube player blocked: \(reason)")))
-                return
-            }
-
-            guard let meta = self.videoInfo(from: payload, videoId: videoId) else {
-                self.debugLog("Innertube response missing playable audio stream for \(videoId).")
-                completion(.failure(DownloadError(message: "No playable audio stream found.")))
-                return
-            }
-            completion(.success(meta))
-        }.resume()
+        Song.invalidateSubtitleCache(forFolder: saved.folderURL)
+        job.libraryIndex?[LibraryKey.id(folderID)] = folderID
+        job.libraryIndex?[LibraryKey.titleArtist(meta.title, meta.artist ?? "Unknown Artist")] = folderID
     }
 
-    private func innertubeClientNumber(for clientName: String) -> String {
-        switch clientName.uppercased() {
-        case "ANDROID_VR": return "28"
-        case "IOS": return "5"
-        case "ANDROID": return "3"
-        case "WEB": return "1"
-        case "MWEB": return "2"
-        case "TVHTML5_SIMPLY_EMBEDDED_PLAYER": return "85"
-        case "WEB_EMBEDDED_PLAYER": return "56"
-        default: return "5"
+    /// Adds songs to the playlist named after the YouTube playlist, in
+    /// playlist order, including ones that were already in the library.
+    private func addToAutoPlaylist(name: String, songIDs: [String]) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty, !songIDs.isEmpty, let ctx = dataManager.modelContext else { return }
+        var seen = Set<String>()
+        let orderedIDs = songIDs.filter { seen.insert($0).inserted }
+        let descriptor = FetchDescriptor<SongData>(predicate: #Predicate { orderedIDs.contains($0.id) })
+        let songs = (try? ctx.fetch(descriptor)) ?? []
+        let byID = Dictionary(songs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let orderedSongs = orderedIDs.compactMap { byID[$0] }
+        guard !orderedSongs.isEmpty else {
+            debugLog("Playlist \"\(trimmedName)\": none of the \(orderedIDs.count) songs were found in the library")
+            return
+        }
+
+        let playlist: PlaylistData
+        if let existing = dataManager.fetchAllPlaylists().first(where: {
+            $0.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                .localizedCaseInsensitiveCompare(trimmedName) == .orderedSame
+        }) {
+            playlist = existing
+            if playlist.coverImagePath == nil {
+                playlist.coverImagePath = orderedSongs.first?.coverImagePath
+            }
+        } else if let created = dataManager.createPlaylist(title: trimmedName, coverImagePath: orderedSongs.first?.coverImagePath) {
+            playlist = created
+        } else {
+            return
+        }
+        dataManager.appendSongsInOrder(orderedSongs, to: playlist)
+        debugLog("Playlist \"\(trimmedName)\": \(orderedSongs.count) songs in playlist order")
+    }
+
+    // MARK: - Background time
+
+    /// One activity per session: a job started while another session's
+    /// activity is still alive (the next queued link) reuses it.
+    private func beginBackgroundActivity() {
+        if let activity = backgroundActivity, activity.isAlive {
+            activity.update(title: BackgroundDownloadText.title(playlistName: nil, trackTitle: nil),
+                            subtitle: BackgroundDownloadText.subtitle(processed: 0, total: 0, failed: 0))
+            return
+        }
+        let activity = BackgroundDownloadActivity(
+            title: BackgroundDownloadText.title(playlistName: nil, trackTitle: nil),
+            subtitle: BackgroundDownloadText.subtitle(processed: 0, total: 0, failed: 0),
+            log: backgroundLogger(prefix: "Background: ")
+        )
+        activity.onLegacyExpired = {
+            // iOS is about to suspend the app: later failures of this job are
+            // interruptions, not YouTube errors.
+            activeJob?.noteBackgrounded()
+        }
+        activity.onContinuedExpired = {
+            // Stopped by iOS or from the system progress UI: same as Cancel
+            // (saved tracks stay); queued links wait for the foreground.
+            backgroundActivity = nil
+            cancelDownload(reason: .backgroundExpired)
+        }
+        backgroundActivity = activity
+        activity.start()
+    }
+
+    private func endBackgroundActivity(success: Bool) {
+        backgroundActivity?.end(success: success)
+        backgroundActivity = nil
+    }
+
+    // MARK: - Logging
+
+    private func debugLog(_ message: String) {
+        appendDebugLine(DownloadDebugLog.write(message))
+    }
+
+    private func appendDebugLine(_ line: String) {
+        debugLogLines.append(line)
+        if debugLogLines.count > 200 {
+            debugLogLines.removeFirst(debugLogLines.count - 200)
         }
     }
 
-    private func extractInnertubeContext(from html: String) -> [String: Any]? {
-        guard let markerRange = html.range(of: "ytcfg.set(") else { return nil }
-        let tail = html[markerRange.upperBound...]
-        guard let start = tail.firstIndex(of: "{") else { return nil }
+    /// For code running off the main actor: file + NSLog now, UI on main.
+    private func backgroundLogger(prefix: String = "") -> (String) -> Void {
+        return { message in
+            let line = DownloadDebugLog.write(prefix + message)
+            Task { @MainActor in self.appendDebugLine(line) }
+        }
+    }
 
+    // MARK: - Notifications
+
+    private func sendProgressNotification(message: String) {
+        // iOS 26+ shows the continued-processing progress itself.
+        if backgroundActivity?.isContinuedRunning ?? false { return }
+        // Single downloads, or every 5th track of a playlist, to avoid spam.
+        if totalCount > 1 && processedCount % 5 != 0 { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Music Download"
+        content.body = message
+        content.sound = nil
+
+        let request = UNNotificationRequest(identifier: "download_progress", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    private func sendCompletionNotification(message: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Download Update"
+        content.body = message
+        content.sound = .default
+
+        let request = UNNotificationRequest(identifier: "download_progress", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+}
+
+struct DownloadError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+// MARK: - Shared-link queue
+
+/// Links handed over by the share extension (App Group inbox) or
+/// `owenisas://download?url=…`, downloaded one at a time, in order, by
+/// DownloadView. A request leaves the inbox only when its job ends
+/// (finished, failed or cancelled), so a download killed with the app is
+/// picked up again on the next launch.
+@MainActor
+final class DownloadRequestCenter: ObservableObject {
+    typealias Request = SharedInbox.LinkRequest
+
+    static let shared = DownloadRequestCenter(inbox: SharedInbox.shared)
+
+    /// Waiting requests, oldest first (the running one is `current`).
+    @Published private(set) var queue: [Request] = []
+    private(set) var current: Request?
+    private let inbox: SharedInbox?
+
+    init(inbox: SharedInbox?) {
+        self.inbox = inbox
+    }
+
+    var hasPending: Bool { !queue.isEmpty }
+
+    /// Adds requests not seen yet (drains repeat on every activation).
+    /// Returns how many were new.
+    @discardableResult
+    func accept(_ requests: [Request]) -> Int {
+        var added = 0
+        for request in requests where request.id != current?.id && !queue.contains(where: { $0.id == request.id }) {
+            queue.append(request)
+            added += 1
+        }
+        return added
+    }
+
+    /// Starts the oldest request, unless one is already running.
+    func takeNext() -> Request? {
+        guard current == nil, !queue.isEmpty else { return nil }
+        let next = queue.removeFirst()
+        current = next
+        return next
+    }
+
+    /// The job for `id` ended; drop it here and from the inbox.
+    func finish(_ id: UUID) {
+        if current?.id == id { current = nil }
+        queue.removeAll { $0.id == id }
+        inbox?.removeLinks(ids: [id])
+    }
+}
+
+// MARK: - Background execution
+
+/// `BGContinuedProcessingTask` identifiers: `<bundle id>.download.<uuid>`,
+/// matching the Info.plist wildcard `com.Owenisas-Music.download.*`.
+enum BackgroundDownloadIdentifier {
+    static let permittedPattern = "com.Owenisas-Music.download.*"
+    static let prefix = "com.Owenisas-Music.download."
+
+    static func make(_ uuid: UUID = UUID()) -> String {
+        prefix + uuid.uuidString
+    }
+
+    /// Whether `identifier` fits a `BGTaskSchedulerPermittedIdentifiers`
+    /// entry (exact, or `prefix.*` with a non-empty suffix).
+    static func matches(_ identifier: String, pattern: String) -> Bool {
+        guard pattern.hasSuffix(".*") else { return identifier == pattern }
+        let base = String(pattern.dropLast(1))
+        return identifier.hasPrefix(base) && identifier.count > base.count
+    }
+}
+
+/// Progress units reported to the system for one background session. Each
+/// job (a queued link, or the typed link) is 1000 units, so a session that
+/// runs several queued links in a row never moves backwards.
+struct BackgroundDownloadProgress: Equatable {
+    static let unitsPerRequest: Int64 = 1000
+
+    private(set) var requestCount = 1
+    private(set) var finishedRequests = 0
+    private(set) var currentFraction: Double = 0
+
+    var totalUnits: Int64 { Int64(requestCount) * Self.unitsPerRequest }
+
+    var completedUnits: Int64 {
+        let current = Int64((currentFraction * Double(Self.unitsPerRequest)).rounded(.down))
+        return min(totalUnits, Int64(finishedRequests) * Self.unitsPerRequest + current)
+    }
+
+    /// Overall fraction (0…1) of the running job; never goes backwards.
+    mutating func update(fraction: Double) {
+        let clamped = min(max(fraction.isFinite ? fraction : 0, 0), 1)
+        currentFraction = max(currentFraction, clamped)
+    }
+
+    /// The running job ended and another queued one follows.
+    mutating func startNextRequest() {
+        finishedRequests = min(finishedRequests + 1, requestCount)
+        requestCount += 1
+        currentFraction = 0
+    }
+}
+
+/// Strings for the system progress UI and the completion notification.
+enum BackgroundDownloadText {
+    static func title(playlistName: String?, trackTitle: String?) -> String {
+        if let name = playlistName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return "Downloading \u{201C}\(name)\u{201D}"
+        }
+        if let track = trackTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !track.isEmpty {
+            return "Downloading \u{201C}\(track)\u{201D}"
+        }
+        return "Downloading music"
+    }
+
+    static func subtitle(processed: Int, total: Int, failed: Int) -> String {
+        guard total > 1 else {
+            return total == 1 && processed >= 1 ? "Saving to your library" : "Getting the song…"
+        }
+        var text = "\(min(processed, total)) of \(total) songs"
+        if failed > 0 { text += ", \(failed) failed" }
+        return text
+    }
+
+    /// "Downloaded N songs" when the job ends with the app in the background.
+    static func completionBody(downloaded: Int, alreadyInLibrary: Int, failed: Int, singleTitle: String? = nil) -> String {
+        var text: String
+        if downloaded == 1, alreadyInLibrary == 0, failed == 0,
+           let title = singleTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            return "Downloaded 1 song: \u{201C}\(title)\u{201D}."
+        }
+        if downloaded == 0 && alreadyInLibrary > 0 {
+            text = alreadyInLibrary == 1 ? "Already in your library" : "All \(alreadyInLibrary) songs were already in your library"
+        } else {
+            text = downloaded == 1 ? "Downloaded 1 song" : "Downloaded \(downloaded) songs"
+            if alreadyInLibrary > 0 { text += ", \(alreadyInLibrary) already in your library" }
+        }
+        if failed > 0 { text += ", \(failed) failed" }
+        return text + "."
+    }
+}
+
+/// Keeps a user-started download session running when the app leaves the
+/// foreground or the phone locks.
+///
+/// - iOS 26+: a `BGContinuedProcessingTask` (system progress UI; runs until
+///   the work ends, or the user/system stops it). Per Apple DTS, a handler
+///   registered for the wildcard itself is never matched, so each session
+///   registers its own `com.Owenisas-Music.download.<uuid>` right before
+///   submitting it (each identifier exactly once: a second registration
+///   kills the app). Submission uses `.fail`: the work starts immediately
+///   either way, the task only adds background time.
+/// - Always, until the continued task is running (and on iOS < 26 or when
+///   submission fails): `beginBackgroundTask`, as before.
+@MainActor
+final class BackgroundDownloadActivity {
+    /// Legacy background time ran out; iOS suspends the app next.
+    var onLegacyExpired: (() -> Void)?
+    /// The continued-processing task was expired by iOS or stopped by the
+    /// user. The activity has already ended itself.
+    var onContinuedExpired: (() -> Void)?
+
+    private(set) var progress = BackgroundDownloadProgress()
+    private(set) var title: String
+    private(set) var subtitle: String
+    private(set) var continuedIdentifier: String?
+    private var continuedTask: AnyObject?
+    private var legacyTask: UIBackgroundTaskIdentifier = .invalid
+    private var ended = false
+    private let log: (String) -> Void
+
+    init(title: String, subtitle: String, log: @escaping (String) -> Void) {
+        self.title = title
+        self.subtitle = subtitle
+        self.log = log
+    }
+
+    var isAlive: Bool { !ended }
+    var isContinuedRunning: Bool { !ended && continuedTask != nil }
+
+    func start() {
+        beginLegacy()
+        if #available(iOS 26.0, *) {
+            submitContinued()
+        }
+    }
+
+    func setFraction(_ fraction: Double) {
+        guard !ended else { return }
+        progress.update(fraction: fraction)
+        applyProgress()
+    }
+
+    func prepareForNextRequest() {
+        guard !ended else { return }
+        progress.startNextRequest()
+        applyProgress()
+    }
+
+    func update(title newTitle: String, subtitle newSubtitle: String) {
+        guard !ended, newTitle != title || newSubtitle != subtitle else { return }
+        title = newTitle
+        subtitle = newSubtitle
+        if #available(iOS 26.0, *), let task = continuedTask as? BGContinuedProcessingTask {
+            task.updateTitle(newTitle, subtitle: newSubtitle)
+        }
+    }
+
+    /// After a trip to the foreground: the legacy grant may have expired.
+    func rearmLegacyIfNeeded() {
+        guard !ended, continuedTask == nil, legacyTask == .invalid else { return }
+        beginLegacy()
+    }
+
+    func end(success: Bool) {
+        guard !ended else { return }
+        ended = true
+        if #available(iOS 26.0, *) {
+            if let task = continuedTask as? BGContinuedProcessingTask {
+                if success { task.progress.completedUnitCount = task.progress.totalUnitCount }
+                task.setTaskCompleted(success: success)
+                log("continued processing completed (success: \(success))")
+            } else if let identifier = continuedIdentifier {
+                BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
+            }
+        }
+        continuedTask = nil
+        endLegacy()
+    }
+
+    // MARK: Legacy background task
+
+    private func beginLegacy() {
+        endLegacy()
+        legacyTask = UIApplication.shared.beginBackgroundTask(withName: "OwenisasDownload") { [weak self] in
+            // Called on the main thread; must end the task before returning.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.log("background time expired")
+                self.onLegacyExpired?()
+                self.endLegacy()
+            }
+        }
+    }
+
+    private func endLegacy() {
+        if legacyTask != .invalid {
+            UIApplication.shared.endBackgroundTask(legacyTask)
+            legacyTask = .invalid
+        }
+    }
+
+    // MARK: Continued processing (iOS 26+)
+
+    private func applyProgress() {
+        if #available(iOS 26.0, *), let task = continuedTask as? BGContinuedProcessingTask {
+            task.progress.totalUnitCount = progress.totalUnits
+            task.progress.completedUnitCount = progress.completedUnits
+        }
+    }
+
+    @available(iOS 26.0, *)
+    private func submitContinued() {
+        let identifier = BackgroundDownloadIdentifier.make()
+        let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: .main) { [weak self] task in
+            MainActor.assumeIsolated {
+                guard let task = task as? BGContinuedProcessingTask else {
+                    task.setTaskCompleted(success: false)
+                    return
+                }
+                guard let self, !self.ended else {
+                    // The session ended before the system started the task.
+                    task.setTaskCompleted(success: true)
+                    return
+                }
+                self.attach(task)
+            }
+        }
+        guard registered else {
+            log("continued processing not registered (identifier not permitted by Info.plist)")
+            return
+        }
+        continuedIdentifier = identifier
+        let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: title, subtitle: subtitle)
+        request.strategy = .fail
+        if #available(iOS 27.0, *) {
+            // The async submit must not run on the main thread.
+            Task.detached { [weak self] in
+                do {
+                    try await BGTaskScheduler.shared.submitTaskRequest(request)
+                } catch {
+                    await self?.submissionFailed(error)
+                }
+            }
+        } else {
+            do {
+                try BGTaskScheduler.shared.submit(request)
+            } catch {
+                submissionFailed(error)
+            }
+        }
+    }
+
+    private func submissionFailed(_ error: Error) {
+        let code = (error as NSError).code
+        log("continued processing unavailable (BGTaskScheduler error \(code)); using the short background grant")
+        continuedIdentifier = nil
+    }
+
+    @available(iOS 26.0, *)
+    private func attach(_ task: BGContinuedProcessingTask) {
+        continuedTask = task
+        task.expirationHandler = { [weak self] in
+            Task { @MainActor in self?.continuedDidExpire() }
+        }
+        applyProgress()
+        task.updateTitle(title, subtitle: subtitle)
+        // The continued task keeps the app running; the ~30 s grant would
+        // only expire and mark the job as interrupted.
+        endLegacy()
+        log("continued processing running")
+    }
+
+    private func continuedDidExpire() {
+        guard !ended else { return }
+        log("continued processing expired; stopping like Cancel")
+        ended = true
+        let task = continuedTask
+        continuedTask = nil
+        endLegacy()
+        onContinuedExpired?()
+        if #available(iOS 26.0, *), let task = task as? BGContinuedProcessingTask {
+            task.setTaskCompleted(success: false)
+        }
+    }
+}
+
+// MARK: - Job (cancellation, temp files, background state)
+
+/// One user-started download. Cancelling it cancels every registered task
+/// (and through them the URLSession requests); temp files it tracks are
+/// deleted at the end of each track and on cancel.
+final class DownloadJob {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var cancelHandlers: [() -> Void] = []
+    private var tempFiles: Set<URL> = []
+    private var backgrounded = false
+
+    // Main-actor bookkeeping.
+    /// The queued shared-link request this job serves, if any.
+    var requestID: UUID?
+    /// Title of the song of a single-video job, once resolved.
+    var currentTrackTitle: String?
+    var playlistName: String?
+    var savedSongIDs: [String] = []
+    var libraryIndex: [String: String]?
+    var folderIndex: [String: String]?
+    var lrclibNetworkFailures = 0
+
+    var isCancelled: Bool { lock.withLock { cancelled } }
+    var wasBackgrounded: Bool { lock.withLock { backgrounded } }
+
+    func cancel() {
+        let handlers: [() -> Void] = lock.withLock {
+            guard !cancelled else { return [] }
+            cancelled = true
+            defer { cancelHandlers = [] }
+            return cancelHandlers
+        }
+        handlers.forEach { $0() }
+    }
+
+    func onCancel(_ handler: @escaping () -> Void) {
+        let runNow: Bool = lock.withLock {
+            if cancelled { return true }
+            cancelHandlers.append(handler)
+            return false
+        }
+        if runNow { handler() }
+    }
+
+    func noteBackgrounded() {
+        lock.withLock { backgrounded = true }
+    }
+
+    func trackTemp(_ url: URL) {
+        _ = lock.withLock { tempFiles.insert(url) }
+    }
+
+    /// Deletes tracked temp files that still exist (saved files were moved away).
+    func cleanupTemps() {
+        let urls: Set<URL> = lock.withLock {
+            defer { tempFiles = [] }
+            return tempFiles
+        }
+        for url in urls where FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+}
+
+enum DownloadTempFiles {
+    static let prefix = "owenisas-dl-"
+
+    static func newURL(ext: String) -> URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(prefix + UUID().uuidString)
+            .appendingPathExtension(ext)
+    }
+
+    /// Leftovers from a crash or kill mid-download (ours, and the older
+    /// bare-UUID names) older than an hour.
+    static func sweepStale(olderThan age: TimeInterval = 3600) {
+        DispatchQueue.global(qos: .utility).async {
+            let fm = FileManager.default
+            let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            guard let files = try? fm.contentsOfDirectory(at: caches, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+            let cutoff = Date().addingTimeInterval(-age)
+            let legacyExts: Set<String> = ["m4a", "jpg", "jpeg", "png", "webp", "gif", "vtt", "srv1"]
+            for file in files {
+                let stem = file.deletingPathExtension().lastPathComponent
+                let ours = stem.hasPrefix(prefix)
+                let legacy = UUID(uuidString: stem) != nil && legacyExts.contains(file.pathExtension.lowercased())
+                guard ours || legacy else { continue }
+                let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                if modified < cutoff { try? fm.removeItem(at: file) }
+            }
+        }
+    }
+}
+
+// MARK: - Debug log (Documents/download-debug.log, rotated at ~1 MB)
+
+enum DownloadDebugLog {
+    static let maxBytes: UInt64 = 1_000_000
+
+    static var fileURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("download-debug.log")
+    }
+
+    static var rotatedFileURL: URL {
+        fileURL.deletingLastPathComponent().appendingPathComponent("download-debug.1.log")
+    }
+
+    private static let queue = DispatchQueue(label: "owenisas.download.debug-log")
+    private static let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
+    /// Logs to NSLog and the file; returns the timestamped line for the UI.
+    /// Never pass cookies, headers or full stream URLs here.
+    @discardableResult
+    static func write(_ message: String) -> String {
+        let line = "[\(formatter.string(from: Date()))] \(message)"
+        NSLog("OWENISAS_DOWNLOAD: %@", line)
+        queue.async { append(line + "\n", to: fileURL, rotatedTo: rotatedFileURL, maxBytes: maxBytes) }
+        return line
+    }
+
+    static func append(_ text: String, to url: URL, rotatedTo rotated: URL, maxBytes: UInt64) {
+        guard let data = text.data(using: .utf8) else { return }
+        let fm = FileManager.default
+        let size = (try? fm.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.uint64Value ?? 0
+        if size + UInt64(data.count) > maxBytes {
+            try? fm.removeItem(at: rotated)
+            try? fm.moveItem(at: url, to: rotated)
+        }
+        if fm.fileExists(atPath: url.path), let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: url)
+        }
+    }
+}
+
+// MARK: - Link classification
+
+// `YouTubeLinkKind` / `YouTubeLinkClassifier` live in Shared/YouTubeLinkClassifier.swift
+// (also used by the share extension).
+
+// MARK: - Progress
+
+enum DownloadProgressMath {
+    static let resolvedFraction = 0.10
+    static let coverFraction = 0.15
+    static let audioDoneFraction = 0.90
+    static let lyricsFraction = 0.95
+
+    /// Overall bar for track `index` of `count`: (index + trackFraction) / count.
+    static func overall(index: Int, count: Int, trackFraction: Double) -> Double {
+        guard count > 0 else { return 0 }
+        let clampedIndex = min(max(index, 0), count)
+        let fraction = min(max(trackFraction.isFinite ? trackFraction : 0, 0), 1)
+        return min((Double(clampedIndex) + fraction) / Double(count), 1)
+    }
+
+    /// Bytes downloaded (0…1) mapped into the track's audio phase.
+    static func audioFraction(_ bytesFraction: Double) -> Double {
+        let clamped = min(max(bytesFraction.isFinite ? bytesFraction : 0, 0), 1)
+        return coverFraction + (audioDoneFraction - coverFraction) * clamped
+    }
+}
+
+// MARK: - Playlist page parsing
+
+struct PlaylistEntry: Equatable {
+    let videoId: String
+    let title: String?
+}
+
+struct PlaylistPage {
+    var title: String
+    var coverUrl: String?
+    var entries: [PlaylistEntry]
+}
+
+enum PlaylistPageParser {
+    struct FirstPage {
+        let title: String?
+        let coverUrl: String?
+        let entries: [PlaylistEntry]
+        let continuation: String?
+        let apiKey: String?
+        let context: [String: Any]?
+    }
+
+    static func firstPage(fromHTML html: String) -> FirstPage? {
+        guard let initialData = initialData(fromHTML: html) else { return nil }
+        let contents: [[String: Any]]
+        if let listRenderer = deepSearch(forKey: "playlistVideoListRenderer", in: initialData),
+           let legacy = listRenderer["contents"] as? [[String: Any]] {
+            contents = legacy
+        } else if let lockups = lockupList(in: initialData) {
+            contents = lockups
+        } else {
+            return nil
+        }
+        return FirstPage(
+            title: title(fromInitialData: initialData),
+            coverUrl: cover(fromInitialData: initialData),
+            entries: entries(from: contents),
+            continuation: continuationToken(from: contents),
+            apiKey: apiKey(fromHTML: html),
+            context: innertubeContext(fromHTML: html)
+        )
+    }
+
+    /// 2026 playlist layout: `itemSectionRenderer.contents` holds
+    /// `lockupViewModel` items plus a trailing `continuationItemViewModel`.
+    /// Pick the largest such list on the page.
+    static func lockupList(in data: [String: Any]) -> [[String: Any]]? {
+        let lists = deepSearchAll(forKey: "contents", in: data)
+            .compactMap { $0 as? [[String: Any]] }
+            .filter { list in list.contains { $0["lockupViewModel"] != nil } }
+        return lists.max { lhs, rhs in
+            lhs.filter { $0["lockupViewModel"] != nil }.count < rhs.filter { $0["lockupViewModel"] != nil }.count
+        }
+    }
+
+    /// Videos in a page or continuation, in order. Reads both the legacy
+    /// `playlistVideoRenderer` and the 2026 `lockupViewModel` items.
+    static func entries(from contents: [[String: Any]]) -> [PlaylistEntry] {
+        contents.compactMap { entry in
+            if let renderer = entry["playlistVideoRenderer"] as? [String: Any] {
+                guard let id = renderer["videoId"] as? String, !id.isEmpty else { return nil }
+                let title = text(fromNode: renderer["title"])?.trimmingCharacters(in: .whitespacesAndNewlines)
+                return PlaylistEntry(videoId: id, title: (title?.isEmpty ?? true) ? nil : title)
+            }
+            if let lockup = entry["lockupViewModel"] as? [String: Any] {
+                if let type = lockup["contentType"] as? String, type != "LOCKUP_CONTENT_TYPE_VIDEO" { return nil }
+                let watch = ((((lockup["rendererContext"] as? [String: Any])?["commandContext"] as? [String: Any])?["onTap"] as? [String: Any])?["innertubeCommand"] as? [String: Any])?["watchEndpoint"] as? [String: Any]
+                guard let id = (lockup["contentId"] as? String) ?? (watch?["videoId"] as? String), !id.isEmpty else { return nil }
+                let title = ((((lockup["metadata"] as? [String: Any])?["lockupMetadataViewModel"] as? [String: Any])?["title"] as? [String: Any])?["content"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return PlaylistEntry(videoId: id, title: (title?.isEmpty ?? true) ? nil : title)
+            }
+            return nil
+        }
+    }
+
+    static func continuationToken(from contents: [[String: Any]]) -> String? {
+        for entry in contents {
+            if let token = (((entry["continuationItemRenderer"] as? [String: Any])?["continuationEndpoint"] as? [String: Any])?["continuationCommand"] as? [String: Any])?["token"] as? String {
+                return token
+            }
+            if let viewModel = entry["continuationItemViewModel"] as? [String: Any],
+               let token = deepSearchAll(forKey: "token", in: viewModel).compactMap({ $0 as? String }).first(where: { !$0.isEmpty }) {
+                return token
+            }
+        }
+        return nil
+    }
+
+    /// Items of a browse continuation response, in order.
+    static func continuationContents(fromBrowse payload: [String: Any]) -> [[String: Any]] {
+        let arrays = deepSearchAll(forKey: "continuationItems", in: payload).compactMap { $0 as? [[String: Any]] }
+        if !arrays.isEmpty { return arrays.flatMap { $0 } }
+        let videos = deepSearchAll(forKey: "playlistVideoRenderer", in: payload)
+            .compactMap { $0 as? [String: Any] }
+            .map { ["playlistVideoRenderer": $0] }
+        let continuations = deepSearchAll(forKey: "continuationItemRenderer", in: payload)
+            .compactMap { $0 as? [String: Any] }
+            .map { ["continuationItemRenderer": $0] }
+        return videos + continuations
+    }
+
+    /// The playlist's own name. A generic deep search for "title" returned
+    /// whatever title key the dictionary happened to visit first.
+    static func title(fromInitialData data: [String: Any]) -> String? {
+        func nonEmpty(_ value: String?) -> String? {
+            guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+            return trimmed
+        }
+        if let title = nonEmpty(((data["metadata"] as? [String: Any])?["playlistMetadataRenderer"] as? [String: Any])?["title"] as? String) {
+            return title
+        }
+        let header = data["header"] as? [String: Any]
+        if let renderer = header?["playlistHeaderRenderer"] as? [String: Any],
+           let title = nonEmpty(text(fromNode: renderer["title"])) {
+            return title
+        }
+        if let renderer = header?["pageHeaderRenderer"] as? [String: Any] {
+            if let title = nonEmpty(renderer["pageTitle"] as? String) { return title }
+            let viewModel = (renderer["content"] as? [String: Any])?["pageHeaderViewModel"] as? [String: Any]
+            let dynamic = (viewModel?["title"] as? [String: Any])?["dynamicTextViewModel"] as? [String: Any]
+            if let title = nonEmpty((dynamic?["text"] as? [String: Any])?["content"] as? String) { return title }
+        }
+        if let title = nonEmpty(((data["microformat"] as? [String: Any])?["microformatDataRenderer"] as? [String: Any])?["title"] as? String) {
+            return title
+        }
+        return nil
+    }
+
+    static func cover(fromInitialData data: [String: Any]) -> String? {
+        if let header = deepSearch(forKey: "playlistHeaderRenderer", in: data) {
+            if let thumbnails = (header["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]],
+               let url = thumbnails.last?["url"] as? String {
+                return url
+            }
+            if let renderer = (header["playlistHeaderBanner"] as? [String: Any])?["heroPlaylistThumbnailRenderer"] as? [String: Any],
+               let thumbnails = (renderer["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]],
+               let url = thumbnails.last?["url"] as? String {
+                return url
+            }
+        }
+        if let thumbnails = (((data["microformat"] as? [String: Any])?["microformatDataRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]],
+           let url = thumbnails.last?["url"] as? String {
+            return url
+        }
+        return nil
+    }
+
+    static func initialData(fromHTML html: String) -> [String: Any]? {
+        extractJSON(fromHTML: html, marker: "ytInitialData = ")
+            ?? extractJSON(fromHTML: html, marker: "window[\"ytInitialData\"] = ")
+            ?? extractJSON(fromHTML: html, marker: "ytInitialData=")
+    }
+
+    static func extractJSON(fromHTML html: String, marker: String) -> [String: Any]? {
+        guard let markerRange = html.range(of: marker) else { return nil }
+        let rest = html[markerRange.upperBound...]
+        guard let end = rest.range(of: ";</script>") else { return nil }
+        let jsonRaw = String(rest[..<end.lowerBound])
+        for payload in [jsonRaw, decodeHexEscapedJSON(jsonRaw)] {
+            guard let data = payload.data(using: .utf8),
+                  let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
+            return dict
+        }
+        return nil
+    }
+
+    static func decodeHexEscapedJSON(_ value: String) -> String {
+        var source = value
+        if source.count >= 2 {
+            let first = source.first, last = source.last
+            if (first == "'" && last == "'") || (first == "\"" && last == "\"") {
+                source.removeFirst()
+                source.removeLast()
+            }
+        }
+        var output = ""
+        var index = source.startIndex
+        while index < source.endIndex {
+            if source[index] == "\\" {
+                let xIndex = source.index(after: index)
+                if xIndex < source.endIndex && source[xIndex] == "x" {
+                    let h1 = source.index(after: xIndex)
+                    let h2 = h1 < source.endIndex ? source.index(after: h1) : source.endIndex
+                    if h2 < source.endIndex, let byte = UInt8(String(source[h1...h2]), radix: 16) {
+                        output.unicodeScalars.append(UnicodeScalar(byte))
+                        index = source.index(after: h2)
+                        continue
+                    }
+                }
+            }
+            output.append(source[index])
+            index = source.index(after: index)
+        }
+        return output
+    }
+
+    static func apiKey(fromHTML html: String) -> String? {
+        for marker in ["\"INNERTUBE_API_KEY\":\"", "\"innertubeApiKey\":\"", "\"INNERTUBE_API_KEY\": \"", "\"innertubeApiKey\": \""] {
+            guard let markerRange = html.range(of: marker) else { continue }
+            let rest = html[markerRange.upperBound...]
+            guard let end = rest.range(of: "\"") else { continue }
+            let key = String(rest[..<end.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !key.isEmpty { return key }
+        }
+        return nil
+    }
+
+    /// INNERTUBE_CONTEXT from whichever `ytcfg.set({...})` call carries it.
+    /// The page has several `ytcfg.set(` calls and the first is not JSON.
+    static func innertubeContext(fromHTML html: String) -> [String: Any]? {
+        var searchStart = html.startIndex
+        while let markerRange = html.range(of: "ytcfg.set(", range: searchStart..<html.endIndex) {
+            searchStart = markerRange.upperBound
+            let rest = html[markerRange.upperBound...].drop(while: { $0 == " " })
+            guard rest.first == "{",
+                  let config = balancedJSONObject(in: html, from: rest.startIndex),
+                  let context = config["INNERTUBE_CONTEXT"] as? [String: Any] else { continue }
+            return context
+        }
+        return nil
+    }
+
+    private static func balancedJSONObject(in html: String, from start: String.Index) -> [String: Any]? {
+        let tail = html[start...]
         var depth = 0
-        var end: String.Index? = nil
+        var end: String.Index?
         var inString = false
         var escape = false
         var idx = start
@@ -711,8 +2034,7 @@ struct DownloadView: View {
             if escape {
                 escape = false
             } else if inString {
-                if c == "\\" { escape = true }
-                else if c == "\"" { inString = false }
+                if c == "\\" { escape = true } else if c == "\"" { inString = false }
             } else {
                 switch c {
                 case "\"": inString = true
@@ -726,624 +2048,41 @@ struct DownloadView: View {
             }
             idx = tail.index(after: idx)
         }
-
-        guard let end, end >= start else { return nil }
-        let jsonString = String(tail[start...end])
-        guard let jsonData = jsonString.data(using: .utf8) else { return nil }
-        let config = (try? JSONSerialization.jsonObject(with: jsonData)) as? [String: Any]
-        return config?["INNERTUBE_CONTEXT"] as? [String: Any]
+        guard let end else { return nil }
+        guard let data = String(tail[start...end]).data(using: .utf8) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
-    private func buildAndroidVRClientContext(from context: [String: Any]?) -> [String: Any] {
-        var clientContext = context?["client"] as? [String: Any] ?? [:]
-        clientContext["clientName"] = "ANDROID_VR"
-        clientContext["clientVersion"] = "1.65.10"
-        clientContext["userAgent"] = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
-        clientContext["deviceMake"] = "Oculus"
-        clientContext["deviceModel"] = "Quest 3"
-        clientContext["androidSdkVersion"] = 32
-        clientContext["osName"] = "Android"
-        clientContext["osVersion"] = "12L"
-        clientContext["gl"] = "US"
-        clientContext["hl"] = "en"
-        clientContext["timeZone"] = "UTC"
-        clientContext["utcOffsetMinutes"] = 0
-
-        return [
-            "client": clientContext,
-            "request": [
-                "useSsl": true,
-                "internalExperimentFlags": [],
-                "consistencyTokenJars": []
-            ],
-            "capabilities": [
-                "allowsInstantApp": true,
-                "desktopLegacyEmbeds": true
-            ]
-        ]
-    }
-
-    private func extractInnertubeSignatureTimestamp(from html: String) -> Int? {
-        let pattern = "\"STS\"\\s*:\\s*(\\d+)"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return nil }
-        let range = NSRange(html.startIndex..<html.endIndex, in: html)
-        guard let match = regex.firstMatch(in: html, range: range), match.numberOfRanges >= 2 else { return nil }
-        let stampRange = Range(match.range(at: 1), in: html)
-        return stampRange.flatMap { Int(String(html[$0])) }
-    }
-
-    private func extractInnertubeAPIKey(from html: String) -> String? {
-        let markers = [
-            "\"INNERTUBE_API_KEY\":\"",
-            "\"innertubeApiKey\":\"",
-            "\"INNERTUBE_API_KEY\": \"",
-            "\"innertubeApiKey\": \""
-        ]
-
-        for marker in markers {
-            guard let markerRange = html.range(of: marker) else { continue }
-            let rest = html[markerRange.upperBound...]
-        guard let end = rest.range(of: "\"") else { continue }
-            let key = String(rest[..<end.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !key.isEmpty {
-                return key
-            }
-        }
-
-        return nil
-    }
-
-    private func parseQueryString(_ value: String) -> [String: String]? {
-        var result: [String: String] = [:]
-        for pair in value.split(separator: "&") {
-            let parts = pair.split(separator: "=", omittingEmptySubsequences: false)
-            guard let key = parts.first else { continue }
-            let keyString = String(key)
-            let rawValue = parts.dropFirst().joined(separator: "=")
-            let parsedValue = rawValue.replacingOccurrences(of: "+", with: " ")
-            result[keyString] = parsedValue.removingPercentEncoding
-        }
-        return result.isEmpty ? nil : result
-    }
-
-    private func extractSubtitleUrls(from player: [String: Any]) -> [String: String] {
-        var subtitleUrls: [String: String] = [:]
-        guard let captions = player["captions"] as? [String: Any] else { return subtitleUrls }
-        let trackList = (captions["playerCaptionsTracklistRenderer"] as? [String: Any])?["captionTracks"] as? [[String: Any]]
-        for track in trackList ?? [] {
-            guard let base = track["baseUrl"] as? String, !base.isEmpty else { continue }
-            let lang = (track["languageCode"] as? String)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                ?? (track["vssId"] as? String)?
-                .replacingOccurrences(of: ".vtt", with: "")
-                .replacingOccurrences(of: ".srt", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let urlWithVTT = base.contains("fmt=") ? base : "\(base)&fmt=vtt"
-            let subtitleLang = (lang ?? "unknown").isEmpty ? "unknown" : (lang ?? "unknown")
-            subtitleUrls[subtitleLang] = urlWithVTT
-        }
-        return subtitleUrls
-    }
-
-    private func videoInfo(from player: [String: Any], videoId: String) -> VideoInfo? {
-        guard let videoDetails = player["videoDetails"] as? [String: Any] else {
-            return nil
-        }
-
-        let title = (videoDetails["title"] as? String) ?? "Unknown Title"
-        let artist = (videoDetails["author"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let rawDuration = videoDetails["lengthSeconds"]
-        let duration = (rawDuration as? String).flatMap(Double.init) ?? (rawDuration as? Double) ?? 0
-
-        let language = (videoDetails["caption"] as? String) == "True" ? "en" : nil
-
-        let thumbnails = (videoDetails["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]]
-        let coverUrl = thumbnails?
-            .compactMap({ $0["url"] as? String })
-            .last ?? ""
-
-        let streamingData = player["streamingData"] as? [String: Any]
-        let adaptiveFormats = streamingData?["adaptiveFormats"] as? [[String: Any]] ?? []
-        let formats = streamingData?["formats"] as? [[String: Any]] ?? []
-        let allFormats = adaptiveFormats + formats
-
-        guard let audioUrl = bestAudioURL(from: allFormats) else {
-            return nil
-        }
-
-        let subtitleUrls = extractSubtitleUrls(from: player)
-
-        return VideoInfo(
-            id: videoId,
-            title: title,
-            artist: artist,
-            album: nil,
-            duration: duration,
-            language: language,
-            audioUrl: audioUrl,
-            coverUrl: coverUrl,
-            subtitleUrls: subtitleUrls.isEmpty ? nil : subtitleUrls
-        )
-    }
-
-    private func bestAudioURL(from formats: [[String: Any]]) -> String? {
-        let audioFormats = formats.filter {
-            guard let mime = ($0["mimeType"] as? String)?.lowercased() else { return false }
-            return mime.contains("audio/")
-        }
-        guard !audioFormats.isEmpty else { return nil }
-
-        let ranked = audioFormats
-            .compactMap { item -> (score: Int, format: [String: Any])? in
-                let mime = (item["mimeType"] as? String)?.lowercased() ?? ""
-                let bitrate = (item["bitrate"] as? Int) ?? (item["averageBitrate"] as? Int) ?? 0
-                let codecBoost = mime.contains("mp4") ? 1_000_000 : 0
-                let candidateScore = bitrate + codecBoost
-                return (candidateScore, item)
-            }
-            .sorted { $0.score > $1.score }
-
-        for (_, format) in ranked {
-            if let url = resolveStreamURL(from: format) { return url }
-        }
-        return nil
-    }
-
-    private func resolveStreamURL(from format: [String: Any]) -> String? {
-        if let url = format["url"] as? String, !url.isEmpty {
-            debugLog("Resolved direct audio URL from format (mime: \((format["mimeType"] as? String) ?? "unknown"), bitrate: \((format["bitrate"] as? Int) ?? 0))")
-            return url
-        }
-
-        let cipherValue = (format["signatureCipher"] as? String) ?? (format["cipher"] as? String)
-        guard let cipherValue else { return nil }
-        guard let cipherDict = parseQueryString(cipherValue) else { return nil }
-        let cipherKeys = cipherDict.keys.sorted().joined(separator: ",")
-        debugLog("Encountered ciphered audio format keys: \(cipherKeys)")
-
-        guard let encoded = cipherDict["url"]?.removingPercentEncoding else { return nil }
-        let signature = cipherDict["s"] ?? cipherDict["sig"]
-        let signKey = cipherDict["sp"] ?? "signature"
-        if let signature {
-            let resolved = "\(encoded)&\(signKey)=\(signature.removingPercentEncoding ?? signature)"
-            debugLog("Resolved signatureCipher stream URL using key '\(signKey)'")
-            return resolved
-        }
-        if let playerURL = cipherDict["player_url"] {
-            debugLog("Encountered cipher without signature; player url present: \(playerURL)")
-        }
-        return nil
-    }
-
-    @MainActor
-    private func handleSingleVideoMetadata(_ meta: VideoInfo, token: UUID) {
-        guard isActiveDownload(token) else { return }
-        let safeTitle = meta.title.replacingOccurrences(of: "/", with: "-").precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
-        let stableIdentifier = stableSongIdentifier(for: meta)
-
-        DispatchQueue.main.async {
-            self.statusMessage = "🎶 Downloading \"\(safeTitle)\"…"
-            self.downloadProgress = 0.2
-            self.sendProgressNotification(message: "Downloading: \(safeTitle)")
-        }
-
-        Task { @MainActor in
-            guard self.isActiveDownload(token) else { return }
-            let existingSongs = self.dataManager.fetchAllSongs()
-            let isDuplicate = self.isDuplicateSong(meta: meta, stableIdentifier: stableIdentifier, existingSongs: existingSongs)
-
-            if isDuplicate {
-                self.debugLog("Single track already exists: \(safeTitle) [\(stableIdentifier)]")
-                self.finishSuccess("✅ \"\(safeTitle)\" already exists in library!", token: token)
-                return
-            }
-
-            self.downloadSingleTrack(meta: meta, safeTitle: safeTitle, stableIdentifier: stableIdentifier, token: token)
-        }
-    }
-
-    @MainActor
-    private func downloadSingleTrack(meta: VideoInfo, safeTitle: String, stableIdentifier: String, token: UUID) {
-        guard isActiveDownload(token) else { return }
-        guard let audioURL = URL(string: meta.audioUrl) else {
-            debugLog("Invalid audio URL for single track: \(safeTitle) [\(stableIdentifier)]")
-            showError("Error", "Invalid audio URL", token: token)
-            return
-        }
-
-        debugLog("Begin single-track download: \(safeTitle) [\(stableIdentifier)]")
-
-        let coverURLStr = meta.coverUrl.isEmpty ? nil : meta.coverUrl
-        let coverURL = coverURLStr.flatMap(URL.init(string:))
-
-        let continueWithAudio = { (localCover: URL?) in
-            self.download(from: audioURL, kind: .audio, retries: self.audioDownloadRetries, suppressUserFacingError: true, token: token) { localAudio in
-                guard self.isActiveDownload(token) else {
-                    if let localAudio {
-                        try? FileManager.default.removeItem(at: localAudio)
-                    }
-                    if let localCover {
-                        try? FileManager.default.removeItem(at: localCover)
-                    }
-                    return
-                }
-                DispatchQueue.main.async { self.downloadProgress = 0.8 }
-                guard let localAudio = localAudio else {
-                    self.debugLog("Audio download failed for single track: \(safeTitle) [\(stableIdentifier)]")
-                    self.showError("Audio Error", "The audio file could not be downloaded. YouTube might be blocking the request.", token: token)
-                    return
-                }
-
-                self.debugLog("Audio download succeeded for single track: \(safeTitle) [\(stableIdentifier)]")
-
-                var ytSubs = meta.subtitleUrls?.filter({ $0.key != "lyrics" }) ?? [:]
-                if ytSubs.count > 3 {
-                    let preferred = [meta.language ?? "ja", "en", "zh-Hant"]
-                    var limited: [String: String] = [:]
-                    for lang in preferred {
-                        if let url = ytSubs[lang] { limited[lang] = url }
-                    }
-                    if limited.isEmpty, let first = ytSubs.first {
-                        limited[first.key] = first.value
-                    }
-                    ytSubs = limited
-                }
-
-                let saveWithLyrics = { (ytDownloaded: [(lang: String, url: URL)]) in
-                    DispatchQueue.main.async {
-                        self.statusMessage = "🎵 Fetching synced lyrics…"
-                    }
-                    self.fetchLRCLIBLyrics(title: meta.title, artist: meta.artist ?? "", album: meta.album ?? "", duration: meta.duration ?? 0) { lrcFile in
-                        guard self.isActiveDownload(token) else {
-                            if let lrcFile {
-                                try? FileManager.default.removeItem(at: lrcFile)
-                            }
-                            return
-                        }
-                        var allSubs = ytDownloaded
-                        if let lrcFile = lrcFile {
-                            allSubs.append((lang: "lyrics", url: lrcFile))
-                        }
-                        self.debugLog("Saving single track with \(allSubs.count) subtitle files: \(safeTitle) [\(stableIdentifier)]")
-                        self.finishSave(folderIdentifier: stableIdentifier, displayTitle: safeTitle, meta: meta, cover: localCover, audio: localAudio, subtitles: allSubs, token: token)
-                    }
-                }
-
-                if !ytSubs.isEmpty {
-                    DispatchQueue.main.async {
-                        self.statusMessage = "💬 Downloading subtitles (\(ytSubs.count) languages)…"
-                    }
-                    self.downloadAllSubtitles(ytSubs, token: token) { downloaded in
-                        guard self.isActiveDownload(token) else {
-                            downloaded.forEach { try? FileManager.default.removeItem(at: $0.url) }
-                            return
-                        }
-                        saveWithLyrics(downloaded)
-                    }
-                } else {
-                    saveWithLyrics([])
-                }
-            }
-        }
-
-        if let validCoverURL = coverURL {
-            download(from: validCoverURL, kind: .image, suppressUserFacingError: true, token: token) { localCover in
-                guard self.isActiveDownload(token) else {
-                    if let localCover {
-                        try? FileManager.default.removeItem(at: localCover)
-                    }
-                    return
-                }
-                DispatchQueue.main.async { self.downloadProgress = 0.4 }
-                continueWithAudio(localCover)
-            }
-        } else {
-            DispatchQueue.main.async { self.downloadProgress = 0.4 }
-            continueWithAudio(nil)
-        }
-    }
-
-    private func finishSave(folderIdentifier: String, displayTitle: String, meta: VideoInfo, cover: URL?, audio: URL, subtitles: [(lang: String, url: URL)], token: UUID) {
-        guard isActiveDownload(token) else {
-            try? FileManager.default.removeItem(at: audio)
-            if let cover {
-                try? FileManager.default.removeItem(at: cover)
-            }
-            subtitles.forEach { try? FileManager.default.removeItem(at: $0.url) }
-            return
-        }
-        do {
-            try saveSongFiles(title: folderIdentifier, meta: meta, localCover: cover, localAudio: audio, localSubtitles: subtitles)
-            debugLog("Saved song files: \(displayTitle) [\(folderIdentifier)]")
-            DispatchQueue.main.async {
-                guard self.isActiveDownload(token) else { return }
-                downloadProgress = 1.0
-                downloadedCount += 1
-                downloadedTrackTitles.append(folderIdentifier)
-                finishSuccess("✅ \"\(displayTitle)\" downloaded!", token: token)
-            }
-        } catch {
-            showError("Save Error", error.localizedDescription, token: token)
-        }
-    }
-
-    // MARK: - Playlist Download
-
-    func isPlaylistLink(_ link: String) -> Bool {
-        link.contains("list=") || link.contains("/playlist")
-    }
-
-    func fetchPlaylistInfo(link: String, token: UUID, retries: Int = 2) {
-        print("[DEBUG] Fetching playlist metadata for: \(link)")
-        debugLog("Fetching playlist metadata")
-
-        guard let playlistId = extractPlaylistId(from: link) else {
-            if let videoId = extractVideoId(from: link) {
-                DispatchQueue.main.async {
-                    self.statusMessage = "Playlist parsing unavailable, downloading single…"
-                    self.totalCount = 1
-                }
-                self.fetchAndDownloadSingle(videoId: videoId, token: token)
-            } else {
-                showError("Playlist Error", "Could not extract a valid playlist ID.", token: token)
-            }
-            return
-        }
-
-        fetchPlaylistVideoIDs(playlistId: playlistId, retries: retries, token: token) { result in
-            switch result {
-            case .success(let playlistPayload):
-                let ids = playlistPayload.videos
-                guard self.isActiveDownload(token) else { return }
-                self.debugLog("Playlist page metadata found: \(ids.count) entries")
-                guard !ids.isEmpty else {
-                    self.showError("Playlist Error", "This playlist appears to be empty or blocked.", token: token)
-                    return
-                }
-                let playlistName = playlistPayload.title.isEmpty ? "Playlist" : playlistPayload.title
-                DispatchQueue.main.async {
-                    self.totalCount = ids.count
-                    self.statusMessage = "📋 Resolving \(ids.count) tracks in \"\(playlistName)\"…"
-                    self.targetPlaylistName = playlistName
-                    self.targetPlaylistCover = playlistPayload.coverUrl
-                }
-                self.resolvePlaylistVideoMetadata(ids: ids, token: token) { result in
-                    switch result {
-                    case .success(let videos):
-                        guard self.isActiveDownload(token) else { return }
-                        if videos.isEmpty {
-                            self.showError("Playlist Error", "Could not resolve playable tracks from this playlist.", token: token)
-                        } else {
-                            self.debugLog("Resolved playlist tracks: \(videos.count)/\(ids.count)")
-                            self.downloadPlaylistTracks(videos, index: 0, token: token)
-                        }
-                    case .failure(let error):
-                        self.showError("Playlist Error", error.message, token: token)
-                    }
-                }
-            case .failure:
-                self.debugLog("Playlist metadata request failed, trying single-video fallback if possible")
-                if let videoId = self.extractVideoId(from: link) {
-                    DispatchQueue.main.async {
-                        self.statusMessage = "Playlist metadata unavailable, downloading single…"
-                        self.totalCount = 1
-                    }
-                    self.fetchAndDownloadSingle(videoId: videoId, token: token)
-                } else {
-                    self.showError("Playlist Error", "The playlist metadata could not be retrieved.", token: token)
-                }
-            }
-        }
-    }
-
-    private func fetchPlaylistVideoIDs(playlistId: String, retries: Int, token: UUID, completion: @escaping (Result<(title: String, coverUrl: String?, videos: [String]), DownloadError>) -> Void) {
-        guard let url = URL(string: "https://www.youtube.com/playlist?list=\(playlistId)&hl=en&gl=US") else {
-            completion(.failure(DownloadError(message: "Could not build playlist URL.")))
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
-        request.timeoutInterval = 30
-
-        URLSession.shared.dataTask(with: request) { data, _, error in
-            guard self.isActiveDownload(token) else { return }
-            if let error {
-                if retries > 0 {
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                        self.fetchPlaylistVideoIDs(playlistId: playlistId, retries: retries - 1, token: token, completion: completion)
-                    }
-                } else {
-                    completion(.failure(DownloadError(message: error.localizedDescription)))
-                }
-                return
-            }
-
-            guard let data, let html = String(data: data, encoding: .utf8) else {
-                completion(.failure(DownloadError(message: "Could not read playlist page.")))
-                return
-            }
-
-            guard let firstPage = self.playlistPagePayload(fromHTML: html) else {
-                if retries > 0 {
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
-                        self.fetchPlaylistVideoIDs(playlistId: playlistId, retries: retries - 1, token: token, completion: completion)
-                    }
-                } else {
-                    completion(.failure(DownloadError(message: "Could not parse playlist page.")))
-                }
-                return
-            }
-
-            var uniqueIDs: [String] = []
-            var seenIDs = Set<String>()
-            for id in firstPage.videos where seenIDs.insert(id).inserted {
-                uniqueIDs.append(id)
-            }
-
-            self.debugLog("Playlist first page found \(firstPage.videos.count) entries\(firstPage.continuation == nil ? "" : ", fetching continuation pages")")
-
-            self.fetchPlaylistContinuationPages(
-                apiKey: firstPage.apiKey,
-                context: firstPage.context,
-                continuation: firstPage.continuation,
-                seenContinuations: [],
-                token: token
-            ) { continuationIDs in
-                guard self.isActiveDownload(token) else { return }
-                for id in continuationIDs where seenIDs.insert(id).inserted {
-                    uniqueIDs.append(id)
-                }
-
-                self.debugLog("Playlist metadata found \(uniqueIDs.count) unique entries across all pages")
-                completion(.success((title: firstPage.title, coverUrl: firstPage.coverUrl, videos: uniqueIDs)))
-            }
-        }.resume()
-    }
-
-    private func playlistPagePayload(fromHTML html: String) -> PlaylistPagePayload? {
-        guard
-            let initialData = extractYouTubeInitialData(from: html),
-            let listRenderer = deepSearch(forKey: "playlistVideoListRenderer", in: initialData),
-            let playlistContents = listRenderer["contents"] as? [[String: Any]]
-        else {
-            return nil
-        }
-
-        let ids = extractPlaylistVideoIDs(from: playlistContents)
-        let continuation = extractContinuationToken(from: playlistContents)
-        let title = extractTextFromNode(deepSearch(forKey: "title", in: initialData)) ?? ""
-        let cover = extractPlaylistCover(from: initialData)
-
-        return PlaylistPagePayload(
-            title: title,
-            coverUrl: cover,
-            videos: ids,
-            continuation: continuation,
-            apiKey: extractInnertubeAPIKey(from: html),
-            context: extractInnertubeContext(from: html)
-        )
-    }
-
-    private func fetchPlaylistContinuationPages(
-        apiKey: String?,
-        context: [String: Any]?,
-        continuation: String?,
-        seenContinuations: Set<String>,
-        token: UUID,
-        completion: @escaping ([String]) -> Void
-    ) {
-        guard isActiveDownload(token), let continuation, !continuation.isEmpty else {
-            completion([])
-            return
-        }
-
-        var updatedSeenContinuations = seenContinuations
-        guard updatedSeenContinuations.insert(continuation).inserted else {
-            completion([])
-            return
-        }
-
-        guard let apiKey, let url = URL(string: "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false&key=\(apiKey)") else {
-            debugLog("Playlist continuation unavailable: missing Innertube API key")
-            completion([])
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 20
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
-        request.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
-        request.setValue("https://www.youtube.com", forHTTPHeaderField: "Referer")
-        request.setValue("1", forHTTPHeaderField: "X-Youtube-Client-Name")
-        request.setValue("2.20240509.00.00", forHTTPHeaderField: "X-Youtube-Client-Version")
-
-        let browseContext = context ?? [
-            "client": [
-                "clientName": "WEB",
-                "clientVersion": "2.20240509.00.00",
-                "hl": "en",
-                "gl": "US"
-            ]
-        ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "context": browseContext,
-            "continuation": continuation
-        ])
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            guard self.isActiveDownload(token) else { return }
-
-            if let error {
-                self.debugLog("Playlist continuation request failed: \(error.localizedDescription)")
-                completion([])
-                return
-            }
-
-            guard
-                let http = response as? HTTPURLResponse,
-                (200..<300).contains(http.statusCode),
-                let data,
-                let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else {
-                let status = (response as? HTTPURLResponse).map { "\($0.statusCode)" } ?? "unknown"
-                self.debugLog("Playlist continuation request failed: HTTP \(status)")
-                completion([])
-                return
-            }
-
-            let contents = self.extractPlaylistContinuationContents(from: payload)
-            let ids = self.extractPlaylistVideoIDs(from: contents)
-            let nextContinuation = self.extractContinuationToken(from: contents)
-            self.debugLog("Playlist continuation page found \(ids.count) entries")
-
-            self.fetchPlaylistContinuationPages(
-                apiKey: apiKey,
-                context: context,
-                continuation: nextContinuation,
-                seenContinuations: updatedSeenContinuations,
-                token: token
-            ) { nextIDs in
-                completion(ids + nextIDs)
-            }
-        }.resume()
-    }
-
-    private func extractPlaylistContinuationContents(from payload: [String: Any]) -> [[String: Any]] {
-        let videoRenderers = deepSearchAll(forKey: "playlistVideoRenderer", in: payload)
-            .compactMap { $0 as? [String: Any] }
-            .map { ["playlistVideoRenderer": $0] }
-        let continuations = deepSearchAll(forKey: "continuationItemRenderer", in: payload)
-            .compactMap { $0 as? [String: Any] }
-            .map { ["continuationItemRenderer": $0] }
-        return videoRenderers + continuations
-    }
-
-    private func extractPlaylistVideoIDs(from contents: [[String: Any]]) -> [String] {
-        contents.compactMap { entry -> String? in
-            guard let renderer = entry["playlistVideoRenderer"] as? [String: Any] else { return nil }
-            return renderer["videoId"] as? String
-        }
-    }
-
-    private func extractContinuationToken(from contents: [[String: Any]]) -> String? {
-        for entry in contents {
-            if let token = (((entry["continuationItemRenderer"] as? [String: Any])?["continuationEndpoint"] as? [String: Any])?["continuationCommand"] as? [String: Any])?["token"] as? String {
-                return token
+    static func text(fromNode value: Any?) -> String? {
+        if let text = value as? String { return text }
+        if let dict = value as? [String: Any] {
+            if let simple = dict["simpleText"] as? String { return simple }
+            if let runs = dict["runs"] as? [[String: Any]] {
+                return runs.compactMap { $0["text"] as? String }.joined()
             }
         }
         return nil
     }
 
-    private func deepSearchAll(forKey key: String, in node: Any) -> [Any] {
+    static func deepSearch(forKey key: String, in node: Any) -> [String: Any]? {
+        if let dict = node as? [String: Any] {
+            if let target = dict[key] as? [String: Any] { return target }
+            for (_, value) in dict {
+                if let found = deepSearch(forKey: key, in: value) { return found }
+            }
+        }
+        if let array = node as? [Any] {
+            for item in array {
+                if let found = deepSearch(forKey: key, in: item) { return found }
+            }
+        }
+        return nil
+    }
+
+    static func deepSearchAll(forKey key: String, in node: Any) -> [Any] {
         var matches: [Any] = []
         if let dict = node as? [String: Any] {
-            if let value = dict[key] {
-                matches.append(value)
-            }
+            if let value = dict[key] { matches.append(value) }
             for value in dict.values {
                 matches.append(contentsOf: deepSearchAll(forKey: key, in: value))
             }
@@ -1354,1115 +2093,961 @@ struct DownloadView: View {
         }
         return matches
     }
+}
 
-    private func resolvePlaylistVideoMetadata(ids: [String], token: UUID, completion: @escaping (Result<[VideoInfo], DownloadError>) -> Void) {
-        guard !ids.isEmpty else {
-            completion(.success([]))
-            return
-        }
+// MARK: - Library keys
 
-        let lock = NSLock()
-        var nextIndex = 0
-        var finishedCount = 0
-        var didComplete = false
-        var resolved: [(index: Int, meta: VideoInfo)] = []
-
-        func finishIfNeeded(force: Bool = false) {
-            lock.lock()
-            let shouldComplete = !didComplete && (force || finishedCount >= ids.count)
-            if shouldComplete { didComplete = true }
-            let ordered = resolved.sorted { $0.index < $1.index }.map(\.meta)
-            lock.unlock()
-
-            if shouldComplete {
-                completion(.success(ordered))
-            }
-        }
-
-        func resolveNext() {
-            guard self.isActiveDownload(token) else {
-                finishIfNeeded(force: true)
-                return
-            }
-
-            lock.lock()
-            guard nextIndex < ids.count else {
-                lock.unlock()
-                finishIfNeeded()
-                return
-            }
-            let index = nextIndex
-            nextIndex += 1
-            lock.unlock()
-
-            self.fetchYouTubeMetadata(videoId: ids[index], retries: 1, token: token) { result in
-                lock.lock()
-                switch result {
-                case .success(let meta):
-                    resolved.append((index: index, meta: meta))
-                case .failure(let error):
-                    self.debugLog("Skipping playlist item \(ids[index]): \(error.message)")
-                }
-                finishedCount += 1
-                let shouldStartAnother = finishedCount < ids.count
-                lock.unlock()
-
-                if shouldStartAnother {
-                    resolveNext()
-                } else {
-                    finishIfNeeded()
-                }
-            }
-        }
-
-        let workerCount = min(playlistMetadataConcurrency, ids.count)
-        for _ in 0..<workerCount {
-            resolveNext()
-        }
-    }
-
-    private func extractPlaylistCover(from initialData: [String: Any]) -> String? {
-        guard let header = deepSearch(forKey: "playlistHeaderRenderer", in: initialData) else { return nil }
-        if let thumbnails = (header["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]],
-           let last = thumbnails.last,
-           let cover = last["url"] as? String {
-            return cover
-        }
-        if let thumbnails = (header["thumbnailRenderer"] as? [String: Any])?["playlistVideoRenderer"] as? [String: Any],
-           let thumbnail = thumbnails["thumbnail"] as? [String: Any],
-           let items = thumbnail["thumbnails"] as? [[String: Any]],
-           let last = items.last,
-           let cover = last["url"] as? String {
-            return cover
-        }
-        return nil
-    }
-
-    private func extractYouTubeInitialData(from html: String) -> [String: Any]? {
-        if let initialData = extractYouTubeJSON(from: html, marker: "ytInitialData = ") { return initialData }
-        if let initialData = extractYouTubeJSON(from: html, marker: "window[\"ytInitialData\"] = ") { return initialData }
-        return extractYouTubeJSON(from: html, marker: "ytInitialData=")
-    }
-
-    private func extractYouTubeJSON(from html: String, marker: String) -> [String: Any]? {
-        guard let markerRange = html.range(of: marker) else { return nil }
-        let rest = html[markerRange.upperBound...]
-        guard let end = rest.range(of: ";</script>") else { return nil }
-        let jsonRaw = String(rest[..<end.lowerBound])
-        for payload in [jsonRaw, decodeHexEscapedJSON(jsonRaw)] {
-            guard let data = payload.data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data),
-                  let dict = object as? [String: Any] else {
-                continue
-            }
-            return dict
-        }
-        return nil
-    }
-
-    private func decodeHexEscapedJSON(_ value: String) -> String {
-        var source = value
-        if source.count >= 2 {
-            let first = source.first
-            let last = source.last
-            if (first == "'" && last == "'") || (first == "\"" && last == "\"") {
-                source.removeFirst()
-                source.removeLast()
-            }
-        }
-
-        var output = ""
-        var index = source.startIndex
-
-        while index < source.endIndex {
-            if source[index] == "\\" {
-                let xIndex = source.index(after: index)
-                if xIndex < source.endIndex && source[xIndex] == "x" {
-                    let h1Index = source.index(after: xIndex)
-                    let h2Index = h1Index < source.endIndex ? source.index(after: h1Index) : source.endIndex
-                    if h2Index < source.endIndex {
-                        let hex = String(source[h1Index...h2Index])
-                        if let byte = UInt8(hex, radix: 16) {
-                            output.unicodeScalars.append(UnicodeScalar(byte))
-                            index = source.index(after: h2Index)
-                            continue
-                        }
-                    }
-                }
-            }
-
-            output.append(source[index])
-            index = source.index(after: index)
-        }
-
-        return output
-    }
-
-    private func extractTextFromNode(_ value: Any?) -> String? {
-        guard let value else { return nil }
-        if let text = value as? String {
-            return text
-        }
-        if let dict = value as? [String: Any] {
-            if let simple = dict["simpleText"] as? String { return simple }
-            if let runs = dict["runs"] as? [[String: Any]] {
-                return runs.compactMap { $0["text"] as? String }.joined()
-            }
-        }
-        return nil
-    }
-
-    private func deepSearch(forKey key: String, in node: Any) -> [String: Any]? {
-        if let dict = node as? [String: Any] {
-            if let target = dict[key] as? [String: Any] {
-                return target
-            }
-            for (_, value) in dict {
-                if let found = deepSearch(forKey: key, in: value) {
-                    return found
-                }
-            }
-        }
-        if let array = node as? [Any] {
-            for item in array {
-                if let found = deepSearch(forKey: key, in: item) {
-                    return found
-                }
-            }
-        }
-        return nil
-    }
-
-    private func songExistsLocally(safeIdentifier rawId: String) -> Bool {
-        let safeIdentifier = rawId.precomposedStringWithCanonicalMapping
-        let fm = FileManager.default
-        guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return false }
-        let songDir = docs.appendingPathComponent("Songs/\(safeIdentifier)")
-        let exists = fm.fileExists(atPath: songDir.path)
-        if exists { print("[DEBUG] Song folder already found on disk: \(safeIdentifier)") }
-        return exists
-    }
-
-    func downloadPlaylistTracks(_ videos: [VideoInfo], index: Int, token: UUID) {
-        guard isActiveDownload(token) else { return }
-        guard index < videos.count else {
-            debugLog("Playlist processing complete. downloaded=\(downloadedCount) skipped=\(skippedCount) failed=\(failedTrackTitles.count)")
-            DispatchQueue.main.async {
-                guard self.isActiveDownload(token) else { return }
-                self.createAutoPlaylist()
-                if self.downloadedCount == 0 && self.skippedCount == 0 && !self.failedTrackTitles.isEmpty {
-                    self.showError("Playlist Failed", "None of the tracks could be downloaded.", token: token)
-                } else {
-                    self.finishSuccess(self.playlistCompletionMessage(), token: token)
-                }
-            }
-            return
-        }
-
-        let meta = videos[index]
-        let safeArtist = (meta.artist ?? "Unknown Artist").replacingOccurrences(of: "/", with: "-").precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
-        let safeTitle = meta.title.replacingOccurrences(of: "/", with: "-").precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
-        let displayIdentifier = "\(safeArtist) - \(safeTitle)"
-        let stableIdentifier = stableSongIdentifier(for: meta)
-
-        DispatchQueue.main.async {
-            statusMessage = "⬇️ (\(index+1)/\(videos.count)) \"\(safeTitle)\""
-            downloadProgress = Double(index) / Double(videos.count)
-            self.sendProgressNotification(message: "Downloading \(index+1) of \(videos.count)\n\(safeTitle)")
-        }
-        debugLog("Processing playlist track \(index + 1)/\(videos.count): \(displayIdentifier) [\(stableIdentifier)]")
-
-        // Check if the song has already been downloaded (skip duplicate downloads)
-        Task { @MainActor in
-            guard self.isActiveDownload(token) else { return }
-            let existingSongs = dataManager.fetchAllSongs()
-            let isDuplicate = self.isDuplicateSong(meta: meta, stableIdentifier: stableIdentifier, existingSongs: existingSongs)
-
-            if isDuplicate {
-                print("[DEBUG] Skipping duplicate: \(displayIdentifier) [\(stableIdentifier)]")
-                self.debugLog("Skipped duplicate playlist track: \(displayIdentifier) [\(stableIdentifier)]")
-                statusMessage = "⏭ Skipping duplicate: \(safeTitle)"
-                self.skippedCount += 1
-                self.downloadedTrackTitles.append(stableIdentifier)
-                // Skip and move to next track
-                DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) {
-                    self.downloadPlaylistTracks(videos, index: index + 1, token: token)
-                }
-                return
-            }
-            
-            // If not duplicate, proceed with audio download (back to background)
-            DispatchQueue.global().async {
-                self.proceedWithPlaylistDownload(videos, index: index, meta: meta, stableIdentifier: stableIdentifier, safeTitle: safeTitle, displayIdentifier: displayIdentifier, token: token)
-            }
-        }
-    }
-
-    private func proceedWithPlaylistDownload(_ videos: [VideoInfo], index: Int, meta: VideoInfo, stableIdentifier: String, safeTitle: String, displayIdentifier: String, token: UUID) {
-        guard isActiveDownload(token) else { return }
-        guard let audioURL = URL(string: meta.audioUrl) else {
-            debugLog("Invalid playlist audio URL: \(displayIdentifier) [\(stableIdentifier)]")
-            DispatchQueue.main.async { self.failedTrackTitles.append(safeTitle) }
-            downloadPlaylistTracks(videos, index: index + 1, token: token)
-            return
-        }
-
-        debugLog("Begin playlist track download: \(displayIdentifier) [\(stableIdentifier)]")
-
-        // Try track cover first, fallback to playlist cover, then nil
-        var finalCoverStr: String? = nil
-        if !meta.coverUrl.isEmpty {
-            finalCoverStr = meta.coverUrl
-        } else if let pCover = targetPlaylistCover, !pCover.isEmpty {
-            finalCoverStr = pCover
-        }
-        
-        let coverURL = finalCoverStr != nil ? URL(string: finalCoverStr!) : nil
-
-        let continueWithAudio = { (localCover: URL?) in
-            self.download(from: audioURL, kind: .audio, retries: self.audioDownloadRetries, suppressUserFacingError: true, token: token) { localAudio in
-                guard self.isActiveDownload(token) else {
-                    if let localAudio {
-                        try? FileManager.default.removeItem(at: localAudio)
-                    }
-                    if let localCover {
-                        try? FileManager.default.removeItem(at: localCover)
-                    }
-                    return
-                }
-                guard let localAudio = localAudio else {
-                    print("[DEBUG] Playlist Download: Audio failed for \(safeTitle), skipping track.")
-                    self.debugLog("Playlist audio failed: \(displayIdentifier) [\(stableIdentifier)]")
-                    DispatchQueue.main.async { self.failedTrackTitles.append(safeTitle) }
-                    self.downloadPlaylistTracks(videos, index: index + 1, token: token)
-                    return
-                }
-                self.debugLog("Playlist audio succeeded: \(displayIdentifier) [\(stableIdentifier)]")
-                
-                let subURLStr = self.bestSubtitleURL(from: meta)
-                if let subURLStr = subURLStr, let parsedSubURL = URL(string: subURLStr) {
-                    self.download(from: parsedSubURL, kind: .subtitle, retries: 0, suppressUserFacingError: true, token: token) { localSubtitle in
-                        guard self.isActiveDownload(token) else {
-                            if let localSubtitle {
-                                try? FileManager.default.removeItem(at: localSubtitle)
-                            }
-                            try? FileManager.default.removeItem(at: localAudio)
-                            if let localCover {
-                                try? FileManager.default.removeItem(at: localCover)
-                            }
-                            return
-                        }
-                        let ytSubs: [(lang: String, url: URL)] = localSubtitle != nil
-                            ? [(lang: meta.language ?? "und", url: localSubtitle!)]
-                            : []
-                        self.fetchLRCLIBLyrics(title: meta.title, artist: meta.artist ?? "", album: meta.album ?? "", duration: meta.duration ?? 0) { lyricsFile in
-                            guard self.isActiveDownload(token) else {
-                                if let lyricsFile {
-                                    try? FileManager.default.removeItem(at: lyricsFile)
-                                }
-                                ytSubs.forEach { try? FileManager.default.removeItem(at: $0.url) }
-                                try? FileManager.default.removeItem(at: localAudio)
-                                if let localCover {
-                                    try? FileManager.default.removeItem(at: localCover)
-                                }
-                                return
-                            }
-                            var allSubs = ytSubs
-                            if let lyricsFile {
-                                allSubs.append((lang: "lyrics", url: lyricsFile))
-                            }
-                            do {
-                                try self.saveSongFiles(title: stableIdentifier, meta: meta, localCover: localCover, localAudio: localAudio, localSubtitles: allSubs)
-                                self.debugLog("Saved playlist track with \(allSubs.count) subtitle files: \(displayIdentifier) [\(stableIdentifier)]")
-                                DispatchQueue.main.async {
-                                    guard self.isActiveDownload(token) else { return }
-                                    self.downloadedCount += 1
-                                    self.downloadedTrackTitles.append(stableIdentifier)
-                                }
-                            } catch {
-                                print("Failed to save \(displayIdentifier) [\(stableIdentifier)]: \(error)")
-                                self.debugLog("Failed saving playlist track: \(displayIdentifier) [\(stableIdentifier)] error=\(error.localizedDescription)")
-                                DispatchQueue.main.async { self.failedTrackTitles.append(safeTitle) }
-                            }
-                            self.downloadPlaylistTracks(videos, index: index + 1, token: token)
-                        }
-                    }
-                } else {
-                    self.fetchLRCLIBLyrics(title: meta.title, artist: meta.artist ?? "", album: meta.album ?? "", duration: meta.duration ?? 0) { lyricsFile in
-                        guard self.isActiveDownload(token) else {
-                            if let lyricsFile {
-                                try? FileManager.default.removeItem(at: lyricsFile)
-                            }
-                            try? FileManager.default.removeItem(at: localAudio)
-                            if let localCover {
-                                try? FileManager.default.removeItem(at: localCover)
-                            }
-                            return
-                        }
-                        let subs = lyricsFile.map { [(lang: "lyrics", url: $0)] } ?? []
-                        do {
-                            try self.saveSongFiles(title: stableIdentifier, meta: meta, localCover: localCover, localAudio: localAudio, localSubtitles: subs)
-                            self.debugLog("Saved playlist track: \(displayIdentifier) [\(stableIdentifier)]")
-                            DispatchQueue.main.async {
-                                guard self.isActiveDownload(token) else { return }
-                                self.downloadedCount += 1
-                                self.downloadedTrackTitles.append(stableIdentifier)
-                            }
-                        } catch {
-                            print("Failed to save \(displayIdentifier) [\(stableIdentifier)]: \(error)")
-                            self.debugLog("Failed saving playlist track without YouTube subs: \(displayIdentifier) [\(stableIdentifier)] error=\(error.localizedDescription)")
-                            DispatchQueue.main.async { self.failedTrackTitles.append(safeTitle) }
-                        }
-                        self.downloadPlaylistTracks(videos, index: index + 1, token: token)
-                    }
-                }
-            }
-        }
-
-        if let validCoverURL = coverURL {
-            download(from: validCoverURL, kind: .image, suppressUserFacingError: true, token: token) { localCover in
-                guard self.isActiveDownload(token) else {
-                    if let localCover {
-                        try? FileManager.default.removeItem(at: localCover)
-                    }
-                    return
-                }
-                continueWithAudio(localCover)
-            }
-        } else {
-            continueWithAudio(nil)
-        }
-    }
-
-    // MARK: - Helpers
-
-    private func createAutoPlaylist() {
-        guard let pName = targetPlaylistName, !pName.isEmpty, !downloadedTrackTitles.isEmpty else { return }
-        
-        dataManager.syncFromFileSystem() // Ensure files are loaded
-        let allSongs = dataManager.fetchAllSongs()
-        let existingPlaylist = dataManager.fetchAllPlaylists().first {
-            $0.title.trimmingCharacters(in: .whitespacesAndNewlines).localizedCaseInsensitiveCompare(pName.trimmingCharacters(in: .whitespacesAndNewlines)) == .orderedSame
-        }
-        
-        let matchingSongs = allSongs.filter { downloadedTrackTitles.contains($0.id) }
-        guard !matchingSongs.isEmpty else { return }
-        
-        // Pick the first downloaded song's cover to represent the playlist locally
-        let firstSongCover = matchingSongs.first?.coverImagePath
-
-        if let existingPlaylist {
-            if existingPlaylist.coverImagePath == nil {
-                existingPlaylist.coverImagePath = firstSongCover
-                try? dataManager.modelContext?.save()
-            }
-
-            for song in matchingSongs {
-                dataManager.addSong(song, to: existingPlaylist)
-            }
-            return
-        }
-
-        if let newPlaylist = dataManager.createPlaylist(title: pName, coverImagePath: firstSongCover) {
-            for song in matchingSongs {
-                dataManager.addSong(song, to: newPlaylist)
-            }
-        }
-    }
-
-    private func playlistCompletionMessage() -> String {
-        let failedCount = failedTrackTitles.count
-        if failedCount == 0 && skippedCount == 0 {
-            return "✅ Playlist download complete! (\(downloadedCount) tracks)"
-        }
-        return "✅ Playlist finished. \(downloadedCount) downloaded, \(skippedCount) skipped, \(failedCount) failed."
-    }
-
-    struct VideoInfo: Decodable {
-        let id: String
-        let title: String
-        let artist: String?
-        let album: String?
-        let duration: Double?
-        let language: String?
-        let audioUrl: String
-        let coverUrl: String
-        let subtitleUrls: [String: String]?
-    }
-
-    /// Pick the best subtitle URL based on the video's original language.
-    /// Priority: LRCLIB lyrics → original language → "en" → first available.
-    func bestSubtitleURL(from meta: VideoInfo) -> String? {
-        guard let subs = meta.subtitleUrls, !subs.isEmpty else { return nil }
-
-        // 1. LRCLIB synced lyrics (highest quality)
-        if let lyrics = subs["lyrics"] { return lyrics }
-
-        // 2. Try video's original language (e.g. "ja" for a Japanese song)
-        if let lang = meta.language, !lang.isEmpty, let url = subs[lang] {
-            return url
-        }
-
-        // 3. Try original language with region prefix (e.g. "ja" matches "ja-JP")
-        if let lang = meta.language, !lang.isEmpty {
-            if let match = subs.first(where: { $0.key.hasPrefix(lang) }) {
-                return match.value
-            }
-        }
-
-        // 4. Fallback to English
-        if let en = subs["en"] { return en }
-        if let match = subs.first(where: { $0.key.hasPrefix("en") }) {
-            return match.value
-        }
-
-        // 5. Last resort: first available
-        return subs.first?.value
-    }
-
-    /// Download all subtitle tracks concurrently. Returns array of (language, local file URL).
-    func downloadAllSubtitles(_ subs: [String: String], token: UUID, completion: @escaping ([(lang: String, url: URL)]) -> Void) {
-        let group = DispatchGroup()
-        var results: [(lang: String, url: URL)] = []
-        let lock = NSLock()
-
-        for (lang, urlStr) in subs {
-            guard let url = URL(string: urlStr) else { continue }
-            group.enter()
-            download(from: url, kind: .subtitle, retries: 0, suppressUserFacingError: true, token: token) { localFile in
-                if let localFile = localFile {
-                    lock.lock()
-                    results.append((lang: lang, url: localFile))
-                    lock.unlock()
-                }
-                group.leave()
-            }
-        }
-
-        group.notify(queue: .main) {
-            completion(results)
-        }
-    }
-
-    // MARK: - LRCLIB Lyrics (client-side, bypasses PythonAnywhere whitelist)
-
-    struct LRCLIBResponse: Decodable {
-        let syncedLyrics: String?
-        let plainLyrics: String?
-    }
-
-    /// Fetch synced lyrics from LRCLIB and convert to VTT. Returns a local temp file URL on success.
-    func fetchLRCLIBLyrics(title: String, artist: String, album: String = "", duration: Double = 0, completion: @escaping (URL?) -> Void) {
-        // Clean up auto-generated YouTube artist names
-        let cleanArtist = artist.replacingOccurrences(of: " - Topic", with: "").trimmingCharacters(in: .whitespaces)
-
-        // 1. Try exact match
-        var components = URLComponents(string: "https://lrclib.net/api/get")!
-        var queryItems = [
-            URLQueryItem(name: "track_name", value: title),
-            URLQueryItem(name: "artist_name", value: cleanArtist)
-        ]
-        if !album.isEmpty { queryItems.append(URLQueryItem(name: "album_name", value: album)) }
-        if duration > 0 { queryItems.append(URLQueryItem(name: "duration", value: String(Int(duration)))) }
-        components.queryItems = queryItems
-
-        guard let url = components.url else { completion(nil); return }
-
-        var request = URLRequest(url: url)
-        request.setValue("OwenisasMusic/1.0 github.com/owenisas/Owenisas-Music", forHTTPHeaderField: "User-Agent")
-        request.timeoutInterval = lrclibRequestTimeout
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let data = data, let result = try? JSONDecoder().decode(LRCLIBResponse.self, from: data) {
-                if let synced = result.syncedLyrics, let vtt = self.lrcToVTT(synced) {
-                    completion(self.writeVTTToTemp(vtt))
-                    return
-                }
-                if let plain = result.plainLyrics {
-                    let vtt = "WEBVTT\n\n00:00.000 --> 99:59.999\n" + plain
-                    completion(self.writeVTTToTemp(vtt))
-                    return
-                }
-            }
-
-            // 2. Fallback: search
-            self.searchLRCLIB(query: "\(cleanArtist) \(title)") { vttFile in
-                completion(vttFile)
-            }
-        }.resume()
-    }
-
-    private func searchLRCLIB(query: String, completion: @escaping (URL?) -> Void) {
-        var components = URLComponents(string: "https://lrclib.net/api/search")!
-        components.queryItems = [URLQueryItem(name: "q", value: query)]
-
-        guard let url = components.url else { completion(nil); return }
-
-        var request = URLRequest(url: url)
-        request.setValue("OwenisasMusic/1.0 github.com/owenisas/Owenisas-Music", forHTTPHeaderField: "User-Agent")
-        request.timeoutInterval = lrclibRequestTimeout
-
-        URLSession.shared.dataTask(with: request) { data, _, _ in
-            guard let data = data, let results = try? JSONDecoder().decode([LRCLIBResponse].self, from: data) else {
-                completion(nil)
-                return
-            }
-
-            // Pick first result with synced lyrics
-            for r in results {
-                if let synced = r.syncedLyrics, let vtt = self.lrcToVTT(synced) {
-                    completion(self.writeVTTToTemp(vtt))
-                    return
-                }
-            }
-            // Plain lyrics as last resort
-            if let first = results.first, let plain = first.plainLyrics {
-                let vtt = "WEBVTT\n\n00:00.000 --> 99:59.999\n" + plain
-                completion(self.writeVTTToTemp(vtt))
-                return
-            }
-            completion(nil)
-        }.resume()
-    }
-
-    /// Convert LRC format ([MM:SS.xx]text) to WebVTT format.
-    private func lrcToVTT(_ lrc: String) -> String? {
-        let lines = lrc.components(separatedBy: "\n")
-        var entries: [(time: Double, text: String)] = []
-
-        let pattern = /\[(\d+):(\d+)\.(\d+)\](.*)/
-        for line in lines {
-            guard let match = line.firstMatch(of: pattern) else { continue }
-            let mins = Double(match.1) ?? 0
-            let secs = Double(match.2) ?? 0
-            let msStr = String(match.3)
-            let ms = Double(msStr.padding(toLength: 3, withPad: "0", startingAt: 0).prefix(3)) ?? 0
-            let text = String(match.4).trimmingCharacters(in: .whitespaces)
-            if text.isEmpty { continue }
-            entries.append((time: mins * 60 + secs + ms / 1000.0, text: text))
-        }
-
-        guard !entries.isEmpty else { return nil }
-
-        var vtt = "WEBVTT\n\n"
-        for (i, entry) in entries.enumerated() {
-            let end = i + 1 < entries.count ? entries[i + 1].time : entry.time + 5.0
-            vtt += "\(formatVTTTime(entry.time)) --> \(formatVTTTime(end))\n"
-            vtt += "\(entry.text)\n\n"
-        }
-        return vtt
-    }
-
-    private func formatVTTTime(_ t: Double) -> String {
-        let m = Int(t) / 60
-        let s = t - Double(m * 60)
-        return String(format: "%02d:%06.3f", m, s)
-    }
-
-    private func writeVTTToTemp(_ vtt: String) -> URL? {
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".vtt")
-        do {
-            try vtt.write(to: tmp, atomically: true, encoding: .utf8)
-            return tmp
-        } catch {
-            return nil
-        }
-    }
-
-    enum DownloadAssetKind {
-        case audio
-        case image
-        case subtitle
-
-        var debugLabel: String {
-            switch self {
-            case .audio:
-                return "audio"
-            case .image:
-                return "image"
-            case .subtitle:
-                return "subtitle"
-            }
-        }
-    }
-
-    private func normalizeYouTubeLink(_ link: String) -> String {
-        guard var components = URLComponents(string: link), let host = components.host?.lowercased() else {
-            return link
-        }
-
-        if host.contains("music.youtube.com") {
-            components.scheme = "https"
-            components.host = "www.youtube.com"
-
-            let items = components.queryItems ?? []
-            let playlistID = items.first(where: { $0.name == "list" })?.value
-            let videoID = items.first(where: { $0.name == "v" })?.value
-            let index = items.first(where: { $0.name == "index" })?.value
-
-            if let playlistID, !playlistID.isEmpty, let videoID, !videoID.isEmpty {
-                components.path = "/watch"
-                components.queryItems = [
-                    URLQueryItem(name: "v", value: videoID),
-                    URLQueryItem(name: "list", value: playlistID)
-                ] + (index.map { [URLQueryItem(name: "index", value: $0)] } ?? [])
-            } else if let playlistID, !playlistID.isEmpty {
-                components.path = "/playlist"
-                components.queryItems = [URLQueryItem(name: "list", value: playlistID)]
-            } else if let videoID, !videoID.isEmpty {
-                components.path = "/watch"
-                components.queryItems = [URLQueryItem(name: "v", value: videoID)]
-            }
-        }
-
-        return components.url?.absoluteString ?? link
-    }
-
-    private func stableSongIdentifier(for meta: VideoInfo) -> String {
-        meta.id.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func isActiveDownload(_ token: UUID) -> Bool {
-        activeDownloadToken == token
-    }
-
-    private func normalizedDuplicateKey(_ value: String?) -> String {
-        guard let value else { return "" }
-
-        return value
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+enum LibraryKey {
+    static func normalize(_ value: String) -> String {
+        value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
             .replacingOccurrences(of: " - topic", with: "")
             .replacingOccurrences(of: "/", with: "-")
+            .precomposedStringWithCanonicalMapping
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func legacySongFolderName(for meta: VideoInfo) -> String? {
-        let artist = normalizedDuplicateKey(meta.artist)
-        let title = normalizedDuplicateKey(meta.title)
-        guard !artist.isEmpty, !title.isEmpty else { return nil }
-        return "\(artist) - \(title)".precomposedStringWithCanonicalMapping
+    /// Video IDs are case-sensitive, so no folding here.
+    static func id(_ id: String) -> String {
+        "id:" + id.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func isDuplicateSong(meta: VideoInfo, stableIdentifier: String, existingSongs: [SongData]) -> Bool {
-        let normalizedTitle = normalizedDuplicateKey(meta.title)
-        let normalizedArtist = normalizedDuplicateKey(meta.artist ?? "Unknown Artist")
-
-        if existingSongs.contains(where: { song in
-            song.id == stableIdentifier || (
-                normalizedDuplicateKey(song.title) == normalizedTitle &&
-                normalizedDuplicateKey(song.artist) == normalizedArtist
-            )
-        }) {
-            return true
-        }
-
-        if songExistsLocally(safeIdentifier: stableIdentifier) {
-            return true
-        }
-
-        if let legacyFolderName = legacySongFolderName(for: meta), songExistsLocally(safeIdentifier: legacyFolderName) {
-            return true
-        }
-
-        return false
+    static func titleArtist(_ title: String, _ artist: String) -> String {
+        "ta:" + normalize(title) + "|" + normalize(artist)
     }
 
-    func saveSongFiles(title: String, meta: VideoInfo, localCover: URL?, localAudio: URL, localSubtitles: [(lang: String, url: URL)]) throws {
+    static func folder(_ name: String) -> String {
+        normalize(name)
+    }
+}
+
+// MARK: - Audio download (sequential Range GETs)
+
+enum AudioDownloadError: Error, Equatable {
+    case blocked(status: Int)
+    case stalled
+    case timedOut
+    case offline
+    case backgrounded
+    case unsupportedFormat
+    case notAudio
+    case tooSmall(bytes: Int64)
+    case httpStatus(Int)
+    case badRange
+    case network(String)
+    case fileSystem(String)
+    case cancelled
+
+    var alertTitle: String {
+        switch self {
+        case .blocked: return "Blocked by YouTube"
+        case .stalled, .timedOut: return "Download Stalled"
+        case .offline: return "You're Offline"
+        case .backgrounded: return "Download Interrupted"
+        case .unsupportedFormat, .notAudio: return "Unsupported Format"
+        case .tooSmall: return "Incomplete Download"
+        case .httpStatus, .badRange, .network: return "Network Error"
+        case .fileSystem: return "Storage Error"
+        case .cancelled: return "Cancelled"
+        }
+    }
+
+    var userMessage: String {
+        switch self {
+        case .blocked(let status):
+            return "YouTube refused the audio stream (HTTP \(status)). The video may be region-locked or protected. Try again later or try another upload of the song."
+        case .stalled:
+            return "YouTube accepted the request but sent no audio for 12 seconds. Check your connection and tap Retry."
+        case .timedOut:
+            return "The download stopped making progress. Check your connection and tap Retry."
+        case .offline:
+            return "You're offline. Connect to the internet and tap Retry."
+        case .backgrounded:
+            return "The download was interrupted while the app was in the background. Keep the app open until it finishes, then tap Retry."
+        case .unsupportedFormat:
+            return "YouTube sent WebM/Opus audio, which the player can't play."
+        case .notAudio:
+            return "The server didn't send a playable audio file."
+        case .tooSmall(let bytes):
+            return "The downloaded audio was too small to be a real track (\(bytes / 1024) KB)."
+        case .httpStatus(let code):
+            return "YouTube's audio server answered HTTP \(code). Tap Retry in a moment."
+        case .badRange:
+            return "YouTube's audio server sent the wrong part of the file. Tap Retry."
+        case .network(let reason):
+            return "Network error: \(reason)"
+        case .fileSystem(let reason):
+            return reason
+        case .cancelled:
+            return "The download was cancelled."
+        }
+    }
+
+    var isRetryable: Bool {
+        switch self {
+        case .unsupportedFormat, .notAudio, .cancelled: return false
+        default: return true
+        }
+    }
+
+    var logDescription: String {
+        switch self {
+        case .blocked(let status): return "blocked HTTP \(status)"
+        case .tooSmall(let bytes): return "too small (\(bytes) bytes)"
+        case .httpStatus(let code): return "HTTP \(code)"
+        case .network(let reason): return "network: \(reason)"
+        default: return "\(self)"
+        }
+    }
+}
+
+enum RangeChunkOutcome: Equatable {
+    /// 206 starting at the requested offset.
+    case partial(total: Int64?)
+    /// 200: the body is the whole file. `restart` when bytes were already
+    /// written (server ignored Range): truncate and start over.
+    case whole(restart: Bool)
+    /// 416 past the end.
+    case endOfStream
+    case blocked(Int)
+    case retryable(Int)
+    case rangeMismatch(expected: Int64, got: Int64)
+    case unexpected(Int)
+}
+
+enum RangeResponse {
+    static func classify(status: Int, contentRange: String?, requestedOffset: Int64) -> RangeChunkOutcome {
+        switch status {
+        case 206:
+            if let header = contentRange, let parsed = parseContentRange(header) {
+                guard parsed.start == requestedOffset else {
+                    return .rangeMismatch(expected: requestedOffset, got: parsed.start)
+                }
+                return .partial(total: parsed.total)
+            }
+            return .partial(total: nil)
+        case 200:
+            return .whole(restart: requestedOffset > 0)
+        case 416:
+            return requestedOffset > 0 ? .endOfStream : .unexpected(416)
+        case 401, 403:
+            return .blocked(status)
+        case 429, 500...599:
+            return .retryable(status)
+        default:
+            return .unexpected(status)
+        }
+    }
+
+    /// `bytes 0-1023/4567` (total may be `*`).
+    static func parseContentRange(_ header: String) -> (start: Int64, end: Int64, total: Int64?)? {
+        var value = header.trimmingCharacters(in: .whitespaces)
+        guard value.lowercased().hasPrefix("bytes") else { return nil }
+        value = String(value.dropFirst(5)).trimmingCharacters(in: CharacterSet(charactersIn: " ="))
+        let halves = value.split(separator: "/", maxSplits: 1)
+        guard halves.count == 2 else { return nil }
+        let bounds = halves[0].split(separator: "-", maxSplits: 1)
+        guard bounds.count == 2,
+              let start = Int64(bounds[0].trimmingCharacters(in: .whitespaces)),
+              let end = Int64(bounds[1].trimmingCharacters(in: .whitespaces)),
+              end >= start else { return nil }
+        return (start, end, Int64(halves[1].trimmingCharacters(in: .whitespaces)))
+    }
+}
+
+/// googlevideo on iOS: URLSessionDownloadTask with the iOS YouTube UA stalls
+/// at 0 bytes (phone log 2026-08-29). Fetch like the resolve probe instead:
+/// cookie-free session, Safari UA, sequential Range requests via data(for:).
+final class ChunkedAudioDownloader {
+    struct Config {
+        /// Small first request: proves bytes flow within the stall window.
+        var firstChunkSize: Int64 = 64 * 1024
+        var chunkSize: Int64 = 512 * 1024
+        var minChunkSize: Int64 = 128 * 1024
+        var firstByteTimeout: TimeInterval = 12
+        var maxTotalRetries = 3
+        var retryDelay: TimeInterval = 1
+        var minimumBytes: Int64 = 20_000
+    }
+
+    private struct Stall: Error {}
+
+    private enum Race {
+        case finished(Data, URLResponse)
+        case deadline
+    }
+
+    /// Captures the URLSessionTask behind `data(for:delegate:)` so the stall
+    /// watchdog can read how many bytes have arrived.
+    private final class TaskCapture: NSObject, URLSessionTaskDelegate {
+        private let lock = NSLock()
+        private var created: URLSessionTask?
+        var task: URLSessionTask? { lock.withLock { created } }
+
+        func urlSession(_ session: URLSession, didCreateTask task: URLSessionTask) {
+            lock.withLock { created = task }
+        }
+    }
+
+    let session: URLSession
+    let userAgent: String
+    let config: Config
+    let log: (String) -> Void
+    let wasBackgrounded: () -> Bool
+
+    init(session: URLSession, userAgent: String, config: Config = Config(),
+         log: @escaping (String) -> Void, wasBackgrounded: @escaping () -> Bool = { false }) {
+        self.session = session
+        self.userAgent = userAgent
+        self.config = config
+        self.log = log
+        self.wasBackgrounded = wasBackgrounded
+    }
+
+    /// Downloads `url` into `dest`. Throws `AudioDownloadError`.
+    @discardableResult
+    func download(from url: URL, to dest: URL, progress: @escaping (Int64, Int64?) -> Void) async throws -> Int64 {
         let fm = FileManager.default
-        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let songsFolder = docs.appendingPathComponent("Songs", isDirectory: true)
-        try fm.createDirectory(at: songsFolder, withIntermediateDirectories: true)
+        guard fm.createFile(atPath: dest.path, contents: nil),
+              let handle = try? FileHandle(forWritingTo: dest) else {
+            throw AudioDownloadError.fileSystem("Couldn't create a temporary file for the download.")
+        }
+        defer { try? handle.close() }
 
-        let normalizedTitle = title.precomposedStringWithCanonicalMapping
-        let songDir = songsFolder.appendingPathComponent(normalizedTitle, isDirectory: true)
+        let started = Date()
+        var offset: Int64 = 0
+        var total: Int64?
+        var chunkSize = config.firstChunkSize
+        var steadyChunkSize = config.chunkSize
+        var retriedAtOffset: Int64 = -1
+        var totalRetries = 0
+
+        func retryOrThrow(_ error: AudioDownloadError, reason: String, shrink: Bool) async throws {
+            guard retriedAtOffset != offset, totalRetries < config.maxTotalRetries else { throw error }
+            retriedAtOffset = offset
+            totalRetries += 1
+            if shrink {
+                steadyChunkSize = max(config.minChunkSize, steadyChunkSize / 2)
+                if offset > 0 { chunkSize = steadyChunkSize }
+            }
+            log("Audio chunk at byte \(offset) failed (\(reason)); retrying once from byte \(offset)")
+            do {
+                try await Task.sleep(nanoseconds: UInt64(config.retryDelay * 1_000_000_000))
+            } catch {
+                throw AudioDownloadError.cancelled
+            }
+        }
+
+        transfer: while true {
+            if Task.isCancelled { throw AudioDownloadError.cancelled }
+            var end = offset + chunkSize - 1
+            if let total { end = min(end, total - 1) }
+            let requested = end - offset + 1
+
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 15
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            request.setValue("*/*", forHTTPHeaderField: "Accept")
+            request.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range")
+
+            let data: Data
+            let http: HTTPURLResponse
+            do {
+                (data, http) = try await fetch(request, stallTimeout: offset == 0 ? config.firstByteTimeout : nil)
+            } catch is Stall {
+                log("Audio stalled: 0 bytes in \(Int(config.firstByteTimeout))s on the first chunk; not retrying this URL")
+                throw wasBackgrounded() ? AudioDownloadError.backgrounded : AudioDownloadError.stalled
+            } catch is CancellationError {
+                throw AudioDownloadError.cancelled
+            } catch let error as URLError {
+                if Task.isCancelled { throw AudioDownloadError.cancelled }
+                let final = finalError(for: error)
+                if final == .offline, offset == 0 { throw final }
+                try await retryOrThrow(final, reason: "\(error.code.rawValue) \(error.localizedDescription)",
+                                       shrink: error.code == .timedOut)
+                continue transfer
+            } catch {
+                if Task.isCancelled { throw AudioDownloadError.cancelled }
+                throw AudioDownloadError.network(error.localizedDescription)
+            }
+
+            let outcome = RangeResponse.classify(status: http.statusCode,
+                                                 contentRange: http.value(forHTTPHeaderField: "Content-Range"),
+                                                 requestedOffset: offset)
+            if offset == 0 {
+                log("Audio first chunk HTTP \(http.statusCode) bytes=\(data.count)")
+            }
+            switch outcome {
+            case .partial(let reportedTotal):
+                guard !data.isEmpty else {
+                    if offset > 0 { break transfer }
+                    throw AudioDownloadError.tooSmall(bytes: 0)
+                }
+                try write(data, to: handle)
+                offset += Int64(data.count)
+                if let reportedTotal, reportedTotal > 0 { total = reportedTotal }
+                chunkSize = steadyChunkSize
+                progress(offset, total)
+                if let total, offset >= total { break transfer }
+                if total == nil && Int64(data.count) < requested { break transfer }
+            case .whole(let restart):
+                if restart {
+                    log("HTTP 200 at byte \(offset): the server ignored Range; restarting the file from byte 0")
+                    do {
+                        try handle.truncate(atOffset: 0)
+                    } catch {
+                        throw AudioDownloadError.fileSystem("Couldn't reset the temporary file.")
+                    }
+                }
+                try write(data, to: handle)
+                offset = Int64(data.count)
+                total = offset
+                progress(offset, total)
+                break transfer
+            case .endOfStream:
+                break transfer
+            case .blocked(let status):
+                log("Audio HTTP \(status): not retrying this URL")
+                throw AudioDownloadError.blocked(status: status)
+            case .retryable(let status):
+                try await retryOrThrow(.httpStatus(status), reason: "HTTP \(status)", shrink: false)
+                continue transfer
+            case .rangeMismatch(let expected, let got):
+                log("Audio Content-Range starts at \(got), expected \(expected)")
+                throw AudioDownloadError.badRange
+            case .unexpected(let status):
+                log("Audio unexpected HTTP \(status) bytes=\(data.count)")
+                throw AudioDownloadError.httpStatus(status)
+            }
+        }
+
+        do {
+            try handle.synchronize()
+        } catch {
+            throw AudioDownloadError.fileSystem("Couldn't finish writing the download.")
+        }
+        let head: Data = {
+            guard let reader = try? FileHandle(forReadingFrom: dest) else { return Data() }
+            defer { try? reader.close() }
+            return (try? reader.read(upToCount: 16)) ?? Data()
+        }()
+        let container = PlayableLocalAudio.container(of: head)
+        let elapsed = max(Date().timeIntervalSince(started), 0.001)
+        log("Audio saved \(offset) bytes container=\(container) in \(String(format: "%.1f", elapsed))s")
+
+        if head.count >= 4 && head.starts(with: [0x1A, 0x45, 0xDF, 0xA3]) {
+            throw AudioDownloadError.unsupportedFormat
+        }
+        if offset < config.minimumBytes {
+            throw AudioDownloadError.tooSmall(bytes: offset)
+        }
+        if container == .unplayable {
+            throw AudioDownloadError.notAudio
+        }
+        return offset
+    }
+
+    private func write(_ data: Data, to handle: FileHandle) throws {
+        do {
+            try handle.write(contentsOf: data)
+        } catch {
+            throw AudioDownloadError.fileSystem("Couldn't write the download (is the phone out of space?).")
+        }
+    }
+
+    private func finalError(for error: URLError) -> AudioDownloadError {
+        if YouTubeClient.isOffline(error) { return .offline }
+        let interruptible: [URLError.Code] = [.networkConnectionLost, .timedOut, .cancelled, .backgroundSessionWasDisconnected]
+        if wasBackgrounded() && interruptible.contains(error.code) { return .backgrounded }
+        if error.code == .timedOut { return .timedOut }
+        return .network(error.localizedDescription)
+    }
+
+    /// One request. For the first chunk, cancel with `Stall` if no byte has
+    /// arrived after `stallTimeout`; once bytes flow the request is left to
+    /// the session's idle (15 s) and per-request (45 s) limits.
+    private func fetch(_ request: URLRequest, stallTimeout: TimeInterval?) async throws -> (Data, HTTPURLResponse) {
+        let capture = TaskCapture()
+        let session = self.session
+        guard let stallTimeout else {
+            let (data, response) = try await session.data(for: request, delegate: capture)
+            return (data, try Self.http(response))
+        }
+        return try await withThrowingTaskGroup(of: Race.self) { group in
+            group.addTask {
+                let (data, response) = try await session.data(for: request, delegate: capture)
+                return .finished(data, response)
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(stallTimeout * 1_000_000_000))
+                return .deadline
+            }
+            while let next = try await group.next() {
+                switch next {
+                case .finished(let data, let response):
+                    group.cancelAll()
+                    return (data, try Self.http(response))
+                case .deadline:
+                    if (capture.task?.countOfBytesReceived ?? 0) == 0 {
+                        group.cancelAll()
+                        throw Stall()
+                    }
+                }
+            }
+            throw URLError(.unknown)
+        }
+    }
+
+    private static func http(_ response: URLResponse) throws -> HTTPURLResponse {
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        return http
+    }
+}
+
+// MARK: - Saving
+
+enum SongFileSaver {
+    struct SavedSong {
+        let folderID: String
+        let folderURL: URL
+    }
+
+    static var songsDirectory: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Songs", isDirectory: true)
+    }
+
+    static func metadata(for meta: VideoInfo) -> SongFolderMetadata {
+        SongFolderMetadata(title: meta.title, artist: meta.artist, album: meta.album,
+                           videoId: meta.id, duration: meta.duration, source: "youtube")
+    }
+
+    /// Writes meta.json, cover, lyric files and finally the audio (a folder
+    /// only counts as a song once playable audio is in it). Existing files
+    /// are replaced only by files that are known good.
+    static func save(folderID rawID: String, meta: VideoInfo, cover: URL?, audio: URL,
+                     subtitles: [(lang: String, vtt: String)], log: (String) -> Void) throws -> SavedSong {
+        let fm = FileManager.default
+        let folderID = rawID.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
+        let songDir = songsDirectory.appendingPathComponent(folderID, isDirectory: true)
         try fm.createDirectory(at: songDir, withIntermediateDirectories: true)
 
-        let destCover = songDir.appendingPathComponent("\(normalizedTitle).jpg")
-        let destAudio = songDir.appendingPathComponent("\(normalizedTitle).m4a")
+        try metadata(for: meta).write(to: songDir)
 
-        if fm.fileExists(atPath: destCover.path) { try fm.removeItem(at: destCover) }
-        if fm.fileExists(atPath: destAudio.path) { try fm.removeItem(at: destAudio) }
-
-        if let localCover = localCover, fm.fileExists(atPath: localCover.path) {
-            if let imageData = try? Data(contentsOf: localCover), !imageData.isEmpty {
-                if let uiImage = UIImage(data: imageData),
-                   let jpegData = uiImage.jpegData(compressionQuality: 0.9) {
-                    try jpegData.write(to: destCover)
-                    debugLog("Saved normalized cover: \(destCover.lastPathComponent)")
-                } else {
-                    debugLog("Could not decode cover image for \(title), discarding cover")
-                }
-            }
-            try? fm.removeItem(at: localCover)
-        }
-        try fm.moveItem(at: localAudio, to: destAudio)
-        if let audioSize = try? fm.attributesOfItem(atPath: destAudio.path)[.size] as? Int64 {
-            debugLog("Saved song files: \(normalizedTitle).m4a -> \(destAudio.path) (\(audioSize) bytes)")
-        } else {
-            debugLog("Saved song files: \(normalizedTitle).m4a -> \(destAudio.path)")
-        }
-
-        // Save each subtitle track with language code: {title}.{lang}.vtt
-        for sub in localSubtitles {
-            let destSubtitle = songDir.appendingPathComponent("\(title).\(sub.lang).vtt")
-            if fm.fileExists(atPath: destSubtitle.path) { try fm.removeItem(at: destSubtitle) }
-            try fm.moveItem(at: sub.url, to: destSubtitle)
-        }
-
-        // Update SwiftData with explicit upsert and metadata
-        DispatchQueue.main.async {
-            guard let ctx = dataManager.modelContext else {
-                debugLog("⚠️ modelContext unavailable while syncing song metadata for \(title)")
-                return
-            }
-
-            dataManager.syncSingleSong(folderName: title)
-
-            let descriptor = FetchDescriptor<SongData>(predicate: #Predicate { $0.id == title })
-            if let existingSong = (try? ctx.fetch(descriptor))?.first {
-                existingSong.title = meta.title
-                existingSong.artist = meta.artist ?? "Unknown Artist"
-                existingSong.albumTitle = meta.album ?? "Unknown Album"
-                existingSong.duration = meta.duration ?? 0
-                existingSong.audioFilePath = "Songs/\(title)/\(normalizedTitle).m4a"
-                existingSong.coverImagePath = fm.fileExists(atPath: destCover.path) ? "Songs/\(title)/\(normalizedTitle).jpg" : nil
-                if let firstSubtitle = localSubtitles.first {
-                    existingSong.subtitleFilePath = "Songs/\(title)/\(title).\(firstSubtitle.lang).vtt"
-                }
-                try? ctx.save()
-                debugLog("Updated SwiftData entry for \(title)")
+        if let cover {
+            defer { try? fm.removeItem(at: cover) }
+            let destCover = songDir.appendingPathComponent("\(folderID).jpg")
+            if let data = try? Data(contentsOf: cover),
+               let image = UIImage(data: data),
+               let jpeg = image.jpegData(compressionQuality: 0.9) {
+                try jpeg.write(to: destCover, options: .atomic)
             } else {
-                let song = SongData(
-                    id: title,
-                    title: meta.title,
-                    artist: meta.artist ?? "Unknown Artist",
-                    albumTitle: meta.album ?? "Unknown Album",
-                    audioFilePath: "Songs/\(title)/\(normalizedTitle).m4a",
-                    coverImagePath: fm.fileExists(atPath: destCover.path) ? "Songs/\(title)/\(normalizedTitle).jpg" : nil,
-                    subtitleFilePath: localSubtitles.first.map { "Songs/\(title)/\(title).\($0.lang).vtt" },
-                    duration: meta.duration ?? 0
-                )
-                ctx.insert(song)
-                try? ctx.save()
-                debugLog("Inserted SwiftData entry for \(title)")
+                log("Cover didn't decode; keeping the existing cover, if any")
             }
         }
-    }
 
-    func finishSuccess(_ message: String, token: UUID) {
-        debugLog("Finished successfully: \(message)")
-        DispatchQueue.main.async {
-            guard self.isActiveDownload(token) else { return }
-            self.activeDownloadToken = nil
-            self.statusMessage = message
-            self.isDownloading = false
-            self.youtubeLink = ""
-            // Sync with SwiftData
-            self.dataManager.syncFromFileSystem()
-            NotificationCenter.default.post(name: .init("SongsFolderChanged"), object: nil)
-
-            // Haptic feedback
-            let generator = UINotificationFeedbackGenerator()
-            generator.notificationOccurred(.success)
-            
-            self.sendCompletionNotification(message: message)
-            self.endBackgroundTask()
+        for subtitle in subtitles {
+            let dest = songDir.appendingPathComponent("\(folderID).\(subtitle.lang).vtt")
+            try subtitle.vtt.write(to: dest, atomically: true, encoding: .utf8)
         }
-    }
 
-    func showError(_ title: String, _ message: String, token: UUID) {
-        debugLog("Show error [\(title)]: \(message)")
-        DispatchQueue.main.async {
-            guard self.isActiveDownload(token) else { return }
-            self.activeDownloadToken = nil
-            self.statusMessage = "❌ \(title): \(message)"
-            alertTitle = title
-            alertMessage = message
-            showAlert = true
-            isDownloading = false
-            youtubeLink = ""
-            
-            self.sendCompletionNotification(message: "Error: \(message)")
-            self.endBackgroundTask()
+        let destAudio = songDir.appendingPathComponent("\(folderID).m4a")
+        if fm.fileExists(atPath: destAudio.path) {
+            _ = try fm.replaceItemAt(destAudio, withItemAt: audio)
+        } else {
+            try fm.moveItem(at: audio, to: destAudio)
         }
+        let size = (try? fm.attributesOfItem(atPath: destAudio.path)[.size] as? NSNumber)?.int64Value ?? 0
+        log("Saved \(destAudio.lastPathComponent) (\(size) bytes)")
+        return SavedSong(folderID: folderID, folderURL: songDir)
     }
-    
-    private func endBackgroundTask() {
-        if backgroundTask != .invalid {
-            UIApplication.shared.endBackgroundTask(backgroundTask)
-            backgroundTask = .invalid
-        }
-    }
+}
 
-    private func beginBackgroundTaskIfNeeded() {
-        guard backgroundTask == .invalid else { return }
-        backgroundTask = UIApplication.shared.beginBackgroundTask {
-            DispatchQueue.main.async {
-                self.endBackgroundTask()
+// MARK: - Lyrics (YouTube captions + LRCLIB)
+
+struct LyricsQuery: Equatable {
+    let track: String
+    let artist: String
+}
+
+/// Turns YouTube text ("Luis Fonsi - Despacito ft. Daddy Yankee",
+/// channel "LuisFonsiVEVO") into a clean track/artist for LRCLIB, and gives
+/// comparison keys for validating LRCLIB hits.
+enum LyricsQueryNormalizer {
+    private static let bracketNoise: Set<String> = [
+        "official", "video", "audio", "lyric", "lyrics", "mv", "m/v", "visualizer", "visualiser",
+        "hd", "hq", "4k", "1080p", "720p", "remaster", "remastered", "explicit", "ft", "feat", "featuring", "prod",
+    ]
+
+    static func query(videoTitle rawTitle: String, channel rawChannel: String?) -> LyricsQuery {
+        let channel = cleanChannel(rawChannel ?? "")
+        var title = firstPipeSegment(stripNoiseBrackets(rawTitle))
+
+        // Japanese convention: Artist「Title」
+        if let open = title.firstIndex(of: "「"), let close = title[open...].firstIndex(of: "」") {
+            let inner = String(title[title.index(after: open)..<close])
+            let before = String(title[..<open])
+            let track = cleanTrack(inner)
+            if !track.isEmpty {
+                let artist = cleanArtistPart(before)
+                return LyricsQuery(track: track, artist: artist.isEmpty ? channel : artist)
             }
         }
+
+        title = collapse(title)
+        if let (left, right) = splitArtistTitle(title) {
+            var artistPart = left
+            var trackPart = right
+            let channelKey = key(channel)
+            if !channelKey.isEmpty, key(right).contains(channelKey), !key(left).contains(channelKey) {
+                swap(&artistPart, &trackPart)
+            }
+            let artist = cleanArtistPart(artistPart)
+            let track = cleanTrack(trackPart)
+            if !track.isEmpty {
+                return LyricsQuery(track: track, artist: artist.isEmpty ? channel : artist)
+            }
+        }
+        return LyricsQuery(track: cleanTrack(title), artist: channel)
     }
 
-    func extractVideoId(from link: String) -> String? {
-        let patterns = [
-            "(?<=v=)[\\w-]+",
-            "(?<=be/)[\\w-]+",
-            "(?<=embed/)[\\w-]+",
-            "(?<=shorts/)[\\w-]+"
-        ]
-        for p in patterns {
-            if let regex = try? NSRegularExpression(pattern: p, options: .caseInsensitive) {
-                let range = NSRange(location: 0, length: link.utf16.count)
-                if let match = regex.firstMatch(in: link, options: [], range: range) {
-                    return (link as NSString).substring(with: match.range)
-                }
+    static func cleanChannel(_ raw: String) -> String {
+        var channel = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        for suffix in [" - topic", " – topic"] where channel.lowercased().hasSuffix(suffix) {
+            channel = String(channel.dropLast(suffix.count))
+        }
+        if channel.lowercased().hasSuffix("vevo"), channel.count > 4 {
+            channel = String(channel.dropLast(4)).trimmingCharacters(in: .whitespaces)
+            if !channel.contains(" ") { channel = splitCamelCase(channel) }
+        }
+        for suffix in [" official youtube channel", " official channel", " official"] where channel.lowercased().hasSuffix(suffix) {
+            let trimmed = String(channel.dropLast(suffix.count))
+            if !trimmed.trimmingCharacters(in: .whitespaces).isEmpty { channel = trimmed }
+        }
+        return collapse(channel.trimmingCharacters(in: CharacterSet(charactersIn: " -–—")))
+    }
+
+    static func cleanTrack(_ raw: String) -> String {
+        var track = firstPipeSegment(stripNoiseBrackets(raw))
+        track = stripFeaturing(track)
+        let trailingNoise = "(?i)[\\s\\-–—:]+(official\\s+(music\\s+|lyric\\s+)?video|official\\s+audio|lyric\\s+video|lyrics?|audio|mv|m/v|visuali[sz]er)\\s*$"
+        while let range = track.range(of: trailingNoise, options: .regularExpression), range.lowerBound > track.startIndex {
+            track.removeSubrange(range)
+        }
+        track = track.trimmingCharacters(in: CharacterSet(charactersIn: " -–—\"'“”‘’"))
+        return collapse(track)
+    }
+
+    static func cleanArtistPart(_ raw: String) -> String {
+        let artist = stripFeaturing(stripNoiseBrackets(raw))
+        return collapse(artist.trimmingCharacters(in: CharacterSet(charactersIn: " -–—:\"'")))
+    }
+
+    /// Lowercased, diacritic-folded, letters and digits only.
+    static func key(_ value: String) -> String {
+        var folded = value.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: nil)
+            .replacingOccurrences(of: "&", with: " and ")
+        for apostrophe in ["'", "’", "‘", "`"] {
+            folded = folded.replacingOccurrences(of: apostrophe, with: "")
+        }
+        let mapped = folded.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? Character($0) : " " }
+        return collapse(String(mapped))
+    }
+
+    static func splitArtistTitle(_ title: String) -> (String, String)? {
+        for separator in [" - ", " – ", " — ", " -- "] {
+            if let range = title.range(of: separator) {
+                let left = String(title[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+                let right = String(title[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+                if !left.isEmpty && !right.isEmpty { return (left, right) }
             }
         }
         return nil
     }
 
-    func extractPlaylistId(from link: String) -> String? {
-        let pattern = "(?<=list=)[\\w-]+"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return nil }
-        let range = NSRange(location: 0, length: link.utf16.count)
-        guard let match = regex.firstMatch(in: link, options: [], range: range) else { return nil }
-        return (link as NSString).substring(with: match.range)
-    }
-
-    private func download(from url: URL, kind: DownloadAssetKind, retries: Int = 3, suppressUserFacingError: Bool = false, token: UUID, completion: @escaping (URL?) -> Void) {
-        debugLog("Starting download [\(kind.debugLabel)] \(url.lastPathComponent)")
-        let startedAt = Date()
-        var task: URLSessionDownloadTask?
-        let timeoutWorkItem: DispatchWorkItem?
-
-        let request = downloadRequest(for: url, kind: kind)
-        if kind == .audio {
-            let workItem = DispatchWorkItem {
-                guard self.isActiveDownload(token) else { return }
-                self.debugLog("Audio download exceeded \(Int(self.maxAudioDownloadDuration))s, cancelling slow stream: \(url.lastPathComponent)")
-                task?.cancel()
-            }
-            timeoutWorkItem = workItem
-            DispatchQueue.global().asyncAfter(deadline: .now() + maxAudioDownloadDuration, execute: workItem)
-        } else {
-            timeoutWorkItem = nil
-        }
-
-        task = Self.urlSession.downloadTask(with: request) { tmp, response, err in
-            timeoutWorkItem?.cancel()
-            guard self.isActiveDownload(token) else {
-                if let tmp {
-                    try? FileManager.default.removeItem(at: tmp)
-                }
-                return
-            }
-            let failureMessage: String?
-            let retryDelay: TimeInterval
-            if let err {
-                failureMessage = err.localizedDescription
-                retryDelay = kind == .audio ? self.audioRetryDelay : 2
-            } else if let http = response as? HTTPURLResponse, let tmp {
-                failureMessage = self.downloadValidationError(for: tmp, response: http, kind: kind)
-                retryDelay = (kind == .audio && http.statusCode == 202) ? self.audioRetryDelay : 2
-            } else {
-                failureMessage = "Invalid download response."
-                retryDelay = kind == .audio ? self.audioRetryDelay : 2
-            }
-
-            if let failureMessage {
-                self.debugLog("Download issue [\(kind.debugLabel)] \(url.lastPathComponent): \(failureMessage)")
-                if retries > 0 {
-                    print("Retrying download... \(retries) left for \(url.lastPathComponent)")
-                    DispatchQueue.global().asyncAfter(deadline: .now() + retryDelay) {
-                        guard self.isActiveDownload(token) else { return }
-                        self.download(from: url, kind: kind, retries: retries - 1, suppressUserFacingError: suppressUserFacingError, token: token, completion: completion)
-                    }
+    private static func stripNoiseBrackets(_ value: String) -> String {
+        var result = value
+        let patterns = ["\\([^()]*\\)", "\\[[^\\[\\]]*\\]", "【[^【】]*】", "（[^（）]*）", "〔[^〔〕]*〕"]
+        for pattern in patterns {
+            var searchStart = result.startIndex
+            while let range = result.range(of: pattern, options: .regularExpression, range: searchStart..<result.endIndex) {
+                let inner = result[range].dropFirst().dropLast().lowercased()
+                let tokens = inner.split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "/") }).map(String.init)
+                if tokens.contains(where: { bracketNoise.contains($0) }) {
+                    result.replaceSubrange(range, with: " ")
+                    searchStart = result.startIndex
                 } else {
-                    if suppressUserFacingError {
-                        print("[DEBUG] Download failed for \(url.lastPathComponent): \(failureMessage)")
-                    } else {
-                        self.showError("Download Failed", failureMessage, token: token)
-                    }
-                    completion(nil)
+                    searchStart = range.upperBound
                 }
-                return
-            }
-
-            guard let tmp else {
-                completion(nil)
-                return
-            }
-
-            let fm = FileManager.default
-            let cacheDir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            let mimeType = response?.mimeType?.lowercased() ?? ""
-            let persistentTempURL = cacheDir
-                .appendingPathComponent(UUID().uuidString)
-                .appendingPathExtension(preferredFileExtension(for: kind, mimeType: mimeType, url: url))
-
-            do {
-                try fm.moveItem(at: tmp, to: persistentTempURL)
-                let bytes = (try? fm.attributesOfItem(atPath: persistentTempURL.path)[.size] as? Int64) ?? 0
-                let elapsed = max(Date().timeIntervalSince(startedAt), 0.001)
-                if kind == .audio {
-                    let bytesPerSecond = Double(bytes) / elapsed
-                    let speedLabel = ByteCountFormatter.string(fromByteCount: Int64(bytesPerSecond), countStyle: .binary)
-                    self.debugLog("Downloaded [\(kind.debugLabel)] \(url.lastPathComponent) -> \(persistentTempURL.lastPathComponent) (\(bytes) bytes, \(speedLabel)/s)")
-                    if bytesPerSecond < self.slowAudioBytesPerSecond {
-                        self.debugLog("Audio stream was slow (\(speedLabel)/s).")
-                    }
-                } else {
-                    self.debugLog("Downloaded [\(kind.debugLabel)] \(url.lastPathComponent) -> \(persistentTempURL.lastPathComponent) (\(bytes) bytes)")
-                }
-                completion(persistentTempURL)
-            } catch {
-                print("Failed to validate or save persistent temp file: \(error)")
-                self.debugLog("Failed moving downloaded file [\(kind.debugLabel)] \(url.lastPathComponent): \(error.localizedDescription)")
-                completion(nil)
             }
         }
-        task?.resume()
+        return collapse(result)
     }
 
-    private func downloadRequest(for url: URL, kind: DownloadAssetKind) -> URLRequest {
+    private static func stripFeaturing(_ value: String) -> String {
+        var result = value
+        if let range = result.range(of: "(?i)\\s+(ft|feat|featuring)\\b\\.?\\s+.*$", options: .regularExpression) {
+            result.removeSubrange(range)
+        }
+        return result
+    }
+
+    private static func firstPipeSegment(_ value: String) -> String {
+        let first = value.components(separatedBy: " | ").first ?? value
+        return first.trimmingCharacters(in: .whitespaces).isEmpty ? value : first
+    }
+
+    private static func splitCamelCase(_ value: String) -> String {
+        var output = ""
+        var previous: Character?
+        for character in value {
+            if let previous, previous.isLowercase, character.isUppercase { output.append(" ") }
+            output.append(character)
+            previous = character
+        }
+        return output
+    }
+
+    private static func collapse(_ value: String) -> String {
+        value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+}
+
+struct LRCLIBRecord: Decodable, Equatable {
+    let trackName: String?
+    let artistName: String?
+    let albumName: String?
+    let duration: Double?
+    let instrumental: Bool?
+    let plainLyrics: String?
+    let syncedLyrics: String?
+
+    init(trackName: String?, artistName: String?, albumName: String? = nil, duration: Double?,
+         instrumental: Bool? = false, plainLyrics: String? = nil, syncedLyrics: String? = nil) {
+        self.trackName = trackName
+        self.artistName = artistName
+        self.albumName = albumName
+        self.duration = duration
+        self.instrumental = instrumental
+        self.plainLyrics = plainLyrics
+        self.syncedLyrics = syncedLyrics
+    }
+}
+
+/// Never take an unvalidated hit: the title must match after normalization
+/// and the length must be within 5 s (or, when the length is unknown, the
+/// artist must match too).
+enum LRCLIBMatcher {
+    static let maxDurationDifference: Double = 5
+
+    static func titleMatches(_ record: LRCLIBRecord, query: LyricsQuery) -> Bool {
+        guard let name = record.trackName, !name.isEmpty else { return false }
+        let target = LyricsQueryNormalizer.key(query.track)
+        guard !target.isEmpty else { return false }
+        let direct = LyricsQueryNormalizer.key(LyricsQueryNormalizer.cleanTrack(name))
+        // Some LRCLIB entries carry the full YouTube title "Artist - Title (Official Video)".
+        let split = LyricsQueryNormalizer.key(LyricsQueryNormalizer.query(videoTitle: name, channel: record.artistName).track)
+        return direct == target || split == target
+    }
+
+    static func artistMatches(_ record: LRCLIBRecord, query: LyricsQuery) -> Bool {
+        let candidate = LyricsQueryNormalizer.key(LyricsQueryNormalizer.cleanChannel(record.artistName ?? ""))
+        let wanted = LyricsQueryNormalizer.key(query.artist)
+        guard !candidate.isEmpty, !wanted.isEmpty else { return false }
+        return candidate == wanted
+            || (candidate.count >= 3 && wanted.contains(candidate))
+            || (wanted.count >= 3 && candidate.contains(wanted))
+    }
+
+    static func durationDifference(_ record: LRCLIBRecord, duration: Double) -> Double? {
+        guard duration > 0, let candidate = record.duration, candidate > 0 else { return nil }
+        return abs(candidate - duration)
+    }
+
+    static func hasLyrics(_ record: LRCLIBRecord) -> Bool {
+        guard record.instrumental != true else { return false }
+        let synced = record.syncedLyrics?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let plain = record.plainLyrics?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !synced.isEmpty || !plain.isEmpty
+    }
+
+    static func isAcceptable(_ record: LRCLIBRecord, query: LyricsQuery, duration: Double) -> Bool {
+        guard hasLyrics(record), titleMatches(record, query: query) else { return false }
+        if duration > 0 {
+            guard let diff = durationDifference(record, duration: duration) else { return false }
+            return diff <= maxDurationDifference
+        }
+        return artistMatches(record, query: query)
+    }
+
+    static func best(_ records: [LRCLIBRecord], query: LyricsQuery, duration: Double) -> LRCLIBRecord? {
+        records.filter { isAcceptable($0, query: query, duration: duration) }
+            .sorted { a, b in
+                let aArtist = artistMatches(a, query: query), bArtist = artistMatches(b, query: query)
+                if aArtist != bArtist { return aArtist }
+                let aSynced = !(a.syncedLyrics ?? "").isEmpty, bSynced = !(b.syncedLyrics ?? "").isEmpty
+                if aSynced != bSynced { return aSynced }
+                return (durationDifference(a, duration: duration) ?? 0) < (durationDifference(b, duration: duration) ?? 0)
+            }
+            .first
+    }
+
+    static func vtt(for record: LRCLIBRecord, fallbackDuration: Double) -> String? {
+        if let synced = record.syncedLyrics, let vtt = LyricsVTTWriter.vtt(fromLRC: synced) { return vtt }
+        if let plain = record.plainLyrics,
+           let vtt = LyricsVTTWriter.vtt(fromPlainLyrics: plain, duration: record.duration ?? fallbackDuration) {
+            return vtt
+        }
+        return nil
+    }
+}
+
+enum LRCLIBClient {
+    struct Lookup {
+        let vtt: String?
+        let networkFailed: Bool
+    }
+
+    private enum Response {
+        case ok(Data)
+        case status(Int)
+        case network
+    }
+
+    static let userAgent = "OwenisasMusic/1.0 (https://github.com/owenisas/Owenisas-Music)"
+
+    /// get (exact signature) → search by fields → free-text search; every
+    /// hit is validated by `LRCLIBMatcher`.
+    static func lyricsVTT(title: String, artist: String?, duration: Double, log: @escaping (String) -> Void) async -> Lookup {
+        let query = LyricsQueryNormalizer.query(videoTitle: title, channel: artist)
+        guard !query.track.isEmpty else { return Lookup(vtt: nil, networkFailed: false) }
+        log("LRCLIB query track=\"\(query.track)\" artist=\"\(query.artist)\" duration=\(Int(duration))")
+
+        if !query.artist.isEmpty, duration > 0 {
+            let items = [
+                URLQueryItem(name: "track_name", value: query.track),
+                URLQueryItem(name: "artist_name", value: query.artist),
+                URLQueryItem(name: "duration", value: String(Int(duration.rounded()))),
+            ]
+            switch await request(path: "/api/get", items: items, log: log) {
+            case .network:
+                return Lookup(vtt: nil, networkFailed: true)
+            case .ok(let data):
+                if let record = try? JSONDecoder().decode(LRCLIBRecord.self, from: data),
+                   LRCLIBMatcher.isAcceptable(record, query: query, duration: duration),
+                   let vtt = LRCLIBMatcher.vtt(for: record, fallbackDuration: duration) {
+                    log("LRCLIB get: hit (\(record.syncedLyrics?.isEmpty == false ? "synced" : "plain"))")
+                    return Lookup(vtt: vtt, networkFailed: false)
+                }
+                log("LRCLIB get: miss (no validated match)")
+            case .status:
+                log("LRCLIB get: miss")
+            }
+        }
+
+        var searches: [[URLQueryItem]] = []
+        var fields = [URLQueryItem(name: "track_name", value: query.track)]
+        if !query.artist.isEmpty { fields.append(URLQueryItem(name: "artist_name", value: query.artist)) }
+        searches.append(fields)
+        searches.append([URLQueryItem(name: "q", value: [query.artist, query.track].filter { !$0.isEmpty }.joined(separator: " "))])
+
+        for (index, items) in searches.enumerated() {
+            if Task.isCancelled { break }
+            switch await request(path: "/api/search", items: items, log: log) {
+            case .network:
+                return Lookup(vtt: nil, networkFailed: true)
+            case .ok(let data):
+                let records = (try? JSONDecoder().decode([LRCLIBRecord].self, from: data)) ?? []
+                if let best = LRCLIBMatcher.best(records, query: query, duration: duration),
+                   let vtt = LRCLIBMatcher.vtt(for: best, fallbackDuration: duration) {
+                    log("LRCLIB search \(index + 1): hit \"\(best.trackName ?? "")\" by \(best.artistName ?? "?") (\(Int(best.duration ?? 0))s)")
+                    return Lookup(vtt: vtt, networkFailed: false)
+                }
+                log("LRCLIB search \(index + 1): miss (\(records.count) results, none validated)")
+            case .status:
+                continue
+            }
+        }
+        return Lookup(vtt: nil, networkFailed: false)
+    }
+
+    private static func request(path: String, items: [URLQueryItem], log: (String) -> Void) async -> Response {
+        var components = URLComponents(string: "https://lrclib.net" + path)!
+        components.queryItems = items
+        guard let url = components.url else { return .status(0) }
         var request = URLRequest(url: url)
-        request.timeoutInterval = kind == .audio ? maxAudioDownloadDuration : 15
-        request.setValue(youtubeUserAgent, forHTTPHeaderField: "User-Agent")
-        request.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
-        request.setValue("https://www.youtube.com/", forHTTPHeaderField: "Referer")
-        request.setValue("gzip, deflate, br", forHTTPHeaderField: "Accept-Encoding")
-
-        switch kind {
-        case .audio:
-            request.setValue("*/*", forHTTPHeaderField: "Accept")
-            request.setValue("bytes=0-", forHTTPHeaderField: "Range")
-        case .image:
-            request.setValue("image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
-        case .subtitle:
-            request.setValue("text/vtt,text/plain,text/xml,application/xml,*/*;q=0.8", forHTTPHeaderField: "Accept")
-            request.timeoutInterval = 8
-        }
-
-        return request
-    }
-
-    private func debugLog(_ message: String) {
-        let line = "[\(Self.debugTimestampFormatter.string(from: Date()))] \(message)"
-        print("[DEBUG] \(line)")
-        NSLog("OWENISAS_DOWNLOAD: %@", line)
-        Self.appendDebugLogToFile(line)
-        DispatchQueue.main.async {
-            self.debugLogLines.append(line)
-            if self.debugLogLines.count > 120 {
-                self.debugLogLines.removeFirst(self.debugLogLines.count - 120)
-            }
+        request.timeoutInterval = 10
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        do {
+            let (data, response) = try await LyricsFetcher.session.data(for: request)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            log("LRCLIB \(path) HTTP \(code) (\(data.count) bytes)")
+            return code == 200 ? .ok(data) : .status(code)
+        } catch {
+            log("LRCLIB \(path) failed: \(error.localizedDescription)")
+            return .network
         }
     }
+}
 
-    private static let debugLogFileURL: URL = {
-        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        return dir.appendingPathComponent("download-debug.log")
+enum LyricsFetcher {
+    static let session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.httpCookieStorage = nil
+        config.urlCache = nil
+        config.timeoutIntervalForRequest = 10
+        config.timeoutIntervalForResource = 15
+        config.waitsForConnectivity = false
+        return URLSession(configuration: config)
     }()
 
-    private static let debugLogQueue = DispatchQueue(label: "download.debug.log")
-
-    private static func appendDebugLogToFile(_ line: String) {
-        debugLogQueue.async {
-            let url = debugLogFileURL
-            guard let data = (line + "\n").data(using: .utf8) else { return }
-            if FileManager.default.fileExists(atPath: url.path),
-               let handle = try? FileHandle(forWritingTo: url) {
-                handle.seekToEndOfFile()
-                handle.write(data)
-                try? handle.close()
-            } else {
-                try? data.write(to: url)
-            }
-        }
+    struct Result {
+        var files: [(lang: String, vtt: String)] = []
+        var lrclibAttempted = false
+        var lrclibNetworkFailed = false
     }
 
-    private func downloadValidationError(for fileURL: URL, response: HTTPURLResponse, kind: DownloadAssetKind) -> String? {
-        let mimeType = response.mimeType?.lowercased() ?? ""
-        guard (200..<300).contains(response.statusCode) else {
-            return readServerError(from: fileURL, fallback: "Server returned \(response.statusCode).")
+    /// Finds lyrics for a song already in the library (NowPlayingView's
+    /// "Find lyrics"). Tries YouTube captions when meta.json or the folder
+    /// name gives a video ID, then LRCLIB by title/artist/duration, so it also
+    /// works for imported songs. Writes `{folder}.lyrics.vtt` /
+    /// `{folder}.{lang}.vtt`, refreshes the subtitle cache and the library
+    /// row, and returns true if any file was written.
+    static func fetchMissingLyrics(for song: Song) async -> Bool {
+        guard let folder = song.songFolderURL else { return false }
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: folder.path) else { return false }
+        let stem = folder.lastPathComponent
+        let log: (String) -> Void = { DownloadDebugLog.write("Find lyrics [\(stem)]: \($0)") }
+
+        let meta = SongFolderMetadata.read(from: folder)
+        var title = meta?.title ?? song.title
+        var artist: String? = meta?.artist ?? (song.artist == "Unknown Artist" ? nil : song.artist)
+        var duration = meta?.duration ?? 0
+        let existing = existingLyricLanguages(in: folder)
+
+        var tracks: [CaptionTrack] = []
+        var language: String?
+        let inferredID = YouTubeLinkClassifier.isVideoID(stem) ? stem : nil
+        if let videoId = meta?.videoId ?? inferredID {
+            do {
+                let info = try await YouTubeClient.shared.fetchCaptionInfo(videoId: videoId)
+                // A folder that merely looks like a video ID must also match
+                // by title before its captions are trusted.
+                let trusted = meta?.videoId != nil
+                    || title == stem
+                    || LyricsQueryNormalizer.key(title) == LyricsQueryNormalizer.key(info.title)
+                if trusted {
+                    tracks = info.tracks
+                    language = info.language
+                    if title == stem || title.isEmpty { title = info.title }
+                    if artist == nil { artist = info.author }
+                    if duration <= 0 { duration = info.duration ?? 0 }
+                } else {
+                    log("folder name looks like a video ID but the titles differ; skipping captions")
+                }
+            } catch {
+                log("caption lookup failed: \(error.localizedDescription)")
+            }
         }
-        guard mimeTypeIsAccepted(mimeType, for: kind) else {
-            return readServerError(from: fileURL, fallback: "Unexpected file type returned by the server.")
+        if duration <= 0 {
+            duration = await audioDuration(of: song.audioFileURL)
         }
 
-        let attr = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)) ?? [:]
-        let size = attr[.size] as? Int64 ?? 0
-        switch kind {
-        case .audio where size < 500_000:
-            return "The downloaded audio file was too small to be valid."
-        case .image where size < 5_000:
-            return "The downloaded cover image was too small to be valid."
-        case .subtitle where size == 0:
-            return "The subtitle file was empty."
-        default:
+        let result = await fetchLyricFiles(captions: tracks, language: language, title: title, artist: artist,
+                                           duration: duration, skipLanguages: existing,
+                                           includeLRCLIB: !existing.contains("lyrics"), log: log)
+        var wrote = false
+        for file in result.files {
+            let dest = folder.appendingPathComponent("\(stem).\(file.lang).vtt")
+            guard !fm.fileExists(atPath: dest.path) else { continue }
+            do {
+                try file.vtt.write(to: dest, atomically: true, encoding: .utf8)
+                wrote = true
+            } catch {
+                log("couldn't write \(dest.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+        log(wrote ? "wrote \(result.files.count) file(s)" : "nothing found")
+        if wrote {
+            await MainActor.run {
+                Song.invalidateSubtitleCache(forFolder: folder)
+                DataManager.shared.syncSingleSong(folderName: stem)
+            }
+        }
+        return wrote
+    }
+
+    /// Caption files (original language + English) and LRCLIB lyrics
+    /// ("lyrics") as VTT text. Nothing is written here.
+    static func fetchLyricFiles(captions: [CaptionTrack], language: String?, title: String, artist: String?,
+                                duration: Double, skipLanguages: Set<String> = [], includeLRCLIB: Bool = true,
+                                log: @escaping (String) -> Void) async -> Result {
+        var result = Result()
+        for pick in CaptionTrackPicker.select(from: captions, originalLanguage: language)
+        where !skipLanguages.contains(pick.lang) {
+            if Task.isCancelled { return result }
+            if let vtt = await downloadCaption(pick.url, log: log) {
+                result.files.append((pick.lang, vtt))
+                log("captions \(pick.lang): saved")
+            }
+        }
+        if includeLRCLIB, !Task.isCancelled {
+            result.lrclibAttempted = true
+            let lookup = await LRCLIBClient.lyricsVTT(title: title, artist: artist, duration: duration, log: log)
+            result.lrclibNetworkFailed = lookup.networkFailed
+            if let vtt = lookup.vtt { result.files.append(("lyrics", vtt)) }
+        }
+        return result
+    }
+
+    static func folderHasSubtitles(_ folder: URL) -> Bool {
+        !existingLyricLanguages(in: folder).isEmpty
+    }
+
+    /// Language suffixes of `*.{lang}.vtt` files already in the folder.
+    static func existingLyricLanguages(in folder: URL) -> Set<String> {
+        let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+        var languages = Set<String>()
+        for file in files where file.pathExtension.lowercased() == "vtt" {
+            let stem = file.deletingPathExtension().lastPathComponent
+            let parts = stem.components(separatedBy: ".")
+            languages.insert(parts.count >= 2 ? (parts.last ?? "original") : "original")
+        }
+        return languages
+    }
+
+    private static func downloadCaption(_ urlString: String, log: (String) -> Void) async -> String? {
+        guard let url = URL(string: urlString) else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        request.setValue(YouTubeClient.safariUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("text/vtt,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        do {
+            let (data, response) = try await session.data(for: request)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard code == 200, let text = String(data: data, encoding: .utf8) else {
+                log("captions HTTP \(code) (\(data.count) bytes)")
+                return nil
+            }
+            let trimmed = text.trimmingCharacters(in: CharacterSet(charactersIn: "\u{FEFF}").union(.whitespacesAndNewlines))
+            guard trimmed.hasPrefix("WEBVTT"), trimmed.contains("-->"),
+                  !LyricsParser.parseVTT(content: trimmed).isEmpty else {
+                log("captions response wasn't usable VTT (\(data.count) bytes)")
+                return nil
+            }
+            return trimmed + "\n"
+        } catch {
+            log("captions request failed: \(error.localizedDescription)")
             return nil
         }
     }
 
-    private func mimeTypeIsAccepted(_ mimeType: String, for kind: DownloadAssetKind) -> Bool {
-        switch kind {
-        case .audio:
-            return mimeType.hasPrefix("audio/") || mimeType == "application/octet-stream"
-        case .image:
-            return mimeType.hasPrefix("image/")
-        case .subtitle:
-            return mimeType.contains("vtt") || mimeType.hasPrefix("text/") || mimeType.contains("xml") || mimeType == "application/octet-stream"
-        }
-    }
-
-    private func preferredFileExtension(for kind: DownloadAssetKind, mimeType: String, url: URL) -> String {
-        switch kind {
-        case .audio:
-            return "m4a"
-        case .image:
-            if mimeType.contains("png") { return "png" }
-            if mimeType.contains("webp") { return "webp" }
-            if mimeType.contains("gif") { return "gif" }
-            return url.pathExtension.isEmpty ? "jpg" : url.pathExtension
-        case .subtitle:
-            return mimeType.contains("xml") ? "srv1" : "vtt"
-        }
-    }
-
-    private func readServerError(from fileURL: URL, fallback: String) -> String {
-        guard let data = try? Data(contentsOf: fileURL), !data.isEmpty else { return fallback }
-        if let text = String(data: data.prefix(512), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
-            return text
-        }
-        return fallback
-    }
-
-    private func sendProgressNotification(message: String) {
-        // Only send progress notifications for single downloads or every 5th track in a playlist to avoid spam
-        if totalCount > 1 && downloadedCount % 5 != 0 { return }
-        
-        let content = UNMutableNotificationContent()
-        content.title = "Music Download"
-        content.body = message
-        content.sound = nil // silent for progress updates
-        
-        let request = UNNotificationRequest(identifier: "download_progress", content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
-    }
-    
-    private func sendCompletionNotification(message: String) {
-        let content = UNMutableNotificationContent()
-        content.title = "Download Update"
-        content.body = message
-        content.sound = .default
-        
-        let request = UNNotificationRequest(identifier: "download_progress", content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
+    private static func audioDuration(of url: URL) async -> Double {
+        let asset = AVURLAsset(url: url)
+        guard let duration = try? await asset.load(.duration) else { return 0 }
+        let seconds = duration.seconds
+        return seconds.isFinite && seconds > 0 ? seconds : 0
     }
 }
-
-struct DownloadError: LocalizedError {
-    let message: String
-    var errorDescription: String? { message }
-}
-
+#endif

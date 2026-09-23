@@ -3,7 +3,7 @@ import SwiftData
 
 struct ContentView: View {
     @ObservedObject var dataManager = DataManager.shared
-    @ObservedObject var player = MusicPlayerManager.shared
+    private let player = MusicPlayerManager.shared
 
     @Query(sort: \SongData.dateAdded, order: .reverse) private var allSongs: [SongData]
     @Query(sort: \PlaylistData.dateCreated, order: .reverse) private var playlists: [PlaylistData]
@@ -35,9 +35,15 @@ struct ContentView: View {
         return Array(result.prefix(50))
     }
 
-    /// Songs you've played the least — surface forgotten tracks.
+    /// Songs you've played the least — surface forgotten tracks. Capped so it
+    /// isn't just "shuffle the whole library" once shuffle is applied.
     private var discoverMix: [SongData] {
-        allSongs.sorted { $0.playCount < $1.playCount }
+        let pool = allSongs.sorted {
+            $0.playCount != $1.playCount
+                ? $0.playCount < $1.playCount
+                : ($0.lastPlayedDate ?? .distantPast) < ($1.lastPlayedDate ?? .distantPast)
+        }
+        return Array(pool.prefix(max(10, min(30, allSongs.count / 3))))
     }
 
     private func playMix(_ songs: [SongData]) {
@@ -80,7 +86,6 @@ struct ContentView: View {
                     allSongsSection
                 }
 
-                Spacer().frame(height: 100)
             }
             .padding(.horizontal, 16)
         }
@@ -218,7 +223,7 @@ struct ContentView: View {
     private var recentlyPlayedCarousel: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 14) {
-                ForEach(Array(recentlyPlayed.prefix(8).enumerated()), id: \.offset) { _, songData in
+                ForEach(Array(recentlyPlayed.prefix(8).enumerated()), id: \.element.persistentModelID) { _, songData in
                     let song = Song.from(songData)
                     Button {
                         player.play(song: song, in: dataManager.toSongs(recentlyPlayed))
@@ -266,7 +271,7 @@ struct ContentView: View {
     private var recentlyAddedCarousel: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 14) {
-                ForEach(Array(allSongs.prefix(10).enumerated()), id: \.offset) { _, songData in
+                ForEach(Array(allSongs.prefix(10).enumerated()), id: \.element.persistentModelID) { _, songData in
                     let song = Song.from(songData)
                     Button {
                         player.play(song: song, in: dataManager.toSongs(allSongs))
@@ -426,7 +431,7 @@ struct ContentView: View {
     }
 
     private func playlistCoverSmall(_ playlist: PlaylistData) -> some View {
-        let urls = Array(playlist.songs.compactMap { $0.coverImageURL }.prefix(4))
+        let urls = Array(playlist.orderedSongs.compactMap { $0.coverImageURL }.prefix(4))
 
         return Group {
             if urls.count >= 4 {
@@ -507,7 +512,7 @@ struct ContentView: View {
             }
             .padding(.bottom, 14)
 
-            ForEach(Array(allSongs.enumerated()), id: \.offset) { index, songData in
+            ForEach(Array(allSongs.enumerated()), id: \.element.persistentModelID) { index, songData in
                 let song = Song.from(songData)
                 SongRow(song: song, index: index + 1, onAdd: {
                     songToAddToPlaylist = songData

@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 struct SongsLibraryView: View {
     @ObservedObject var dataManager = DataManager.shared
-    @ObservedObject var player = MusicPlayerManager.shared
+    private let player = MusicPlayerManager.shared
 
     @Query(sort: \SongData.dateAdded, order: .reverse) private var allSongs: [SongData]
     @State private var searchText = ""
@@ -29,7 +29,23 @@ struct SongsLibraryView: View {
         case mostPlayed = "Most Played"
     }
 
+    /// Order captured for the play-based sorts so tapping a song doesn't
+    /// immediately bump it to the top of the list you're browsing.
+    @State private var frozenPlayOrder: [String]?
+
     var filteredSongs: [SongData] {
+        let live = liveFilteredSongs
+        switch sortOption {
+        case .lastPlayed, .mostPlayed: return live.ordered(like: frozenPlayOrder)
+        default: return live
+        }
+    }
+
+    private func freezePlayOrder() {
+        frozenPlayOrder = liveFilteredSongs.map(\.id)
+    }
+
+    private var liveFilteredSongs: [SongData] {
         var songs = allSongs
 
         if !searchText.isEmpty {
@@ -74,7 +90,7 @@ struct SongsLibraryView: View {
         .overlay(alignment: .bottom) {
             if editMode == .active {
                 selectionToolbar
-                    .padding(.bottom, 60) // Just above the tab bar
+                    .padding(.bottom, 8)
             }
         }
         .searchable(text: $searchText, prompt: "Search songs")
@@ -112,6 +128,8 @@ struct SongsLibraryView: View {
         .onDisappear {
             player.showMiniPlayer = true
         }
+        .onAppear(perform: freezePlayOrder)
+        .onChange(of: sortOption) { freezePlayOrder() }
         .sheet(item: $songToAddToPlaylist) { songData in
             AddToPlaylistView(song: songData)
         }
@@ -269,10 +287,6 @@ struct SongsLibraryView: View {
             }
             .onDelete(perform: deleteSongs)
 
-            Color.clear
-                .frame(height: 80)
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
         }
         .listStyle(.plain)
         .environment(\.editMode, $editMode)
@@ -362,10 +376,17 @@ struct SongsLibraryView: View {
             Text("Your library is empty")
                 .font(.system(size: 20, weight: .bold, design: .rounded))
 
+            #if APP_STORE
             Text("Import audio files you already own\nfrom Files on this device")
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+            #else
+            Text("Download songs from YouTube\nor import audio files you already own")
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            #endif
 
             Button {
                 showAudioImporter = true

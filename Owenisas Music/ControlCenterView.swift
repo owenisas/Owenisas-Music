@@ -1,68 +1,72 @@
 import SwiftUI
 
+extension View {
+    /// Reserve room for the mini player at the bottom of a tab's content, so
+    /// the last rows of every screen scroll clear of it (no hard-coded spacers).
+    func miniPlayerInset() -> some View {
+        safeAreaInset(edge: .bottom, spacing: 0) {
+            MiniPlayerView()
+                .padding(.bottom, 6)
+        }
+    }
+}
+
 struct MiniPlayerView: View {
     @ObservedObject var player = MusicPlayerManager.shared
-    @State private var localCurrentTime: TimeInterval = 0
 
     var body: some View {
-        if let song = player.currentSong {
+        if player.showMiniPlayer, let song = player.currentSong {
             VStack(spacing: 0) {
                 // Thin progress line
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Rectangle()
-                            .fill(.white.opacity(0.08))
-                        Rectangle()
-                            .fill(LinearGradient(colors: [.green, .green.opacity(0.7)], startPoint: .leading, endPoint: .trailing))
-                            .frame(width: geo.size.width * progressFraction)
-                            .animation(.linear(duration: 0.25), value: progressFraction)
-                    }
-                }
-                .frame(height: 2.5)
+                PlaybackProgressLine(player: player, songID: song.id, isPlaying: player.isPlaying)
+                    .frame(height: 2.5)
 
                 HStack(spacing: 12) {
                     CachedCoverImage(song.coverImageURL, size: 46, cornerRadius: 8)
                         .shadow(color: .white.opacity(0.08), radius: 8)
                         .id(song.id)
-                        .transition(.scale.combined(with: .opacity))
+                        .transition(.opacity)
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(song.title)
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(.white)
                             .lineLimit(1)
-                            .id("title-\(song.id)")
 
                         Text(song.artist)
                             .font(.system(size: 12))
                             .foregroundStyle(.white.opacity(0.5))
                             .lineLimit(1)
                     }
+                    .id("title-\(song.id)")
+                    .transition(.opacity)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityHint("Opens the full player")
 
-                    Spacer()
+                    Spacer(minLength: 4)
 
                     // Favorite button
                     Button {
-                        let impact = UIImpactFeedbackGenerator(style: .light)
-                        impact.impactOccurred()
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         player.toggleFavorite()
                     } label: {
                         Image(systemName: song.isFavorited ? "heart.fill" : "heart")
-                            .font(.system(size: 14))
-                            .foregroundStyle(song.isFavorited ? .pink : .white.opacity(0.4))
-                            .frame(width: 28, height: 28)
+                            .font(.system(size: 15))
+                            .foregroundStyle(song.isFavorited ? .pink : .white.opacity(0.5))
+                            .frame(width: 40, height: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(song.isFavorited ? "Remove from Liked Songs" : "Add to Liked Songs")
 
                     Button {
-                        let impact = UIImpactFeedbackGenerator(style: .light)
-                        impact.impactOccurred()
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         player.togglePlayPause()
                     } label: {
                         Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 18, weight: .semibold))
+                            .font(.system(size: 19, weight: .semibold))
                             .foregroundStyle(.white)
-                            .frame(width: 36, height: 36)
+                            .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -70,22 +74,24 @@ struct MiniPlayerView: View {
                     .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
 
                     Button {
-                        let impact = UIImpactFeedbackGenerator(style: .light)
-                        impact.impactOccurred()
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         player.next()
                     } label: {
                         Image(systemName: "forward.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.6))
-                            .frame(width: 28, height: 28)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.7))
+                            .frame(width: 40, height: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Next song")
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
+                .padding(.leading, 12)
+                .padding(.trailing, 6)
+                .padding(.vertical, 4)
+                .animation(.easeOut(duration: 0.2), value: song.id)
             }
-            .animation(.spring(response: 0.4, dampingFraction: 0.8), value: song.id)
-            .background(miniPlayerBackground(song: song))
+            .background(MiniPlayerBackgroundView(path: song.coverImageURL?.path))
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .shadow(color: .black.opacity(0.35), radius: 10, x: 0, y: 5)
             .padding(.horizontal, 8)
@@ -101,33 +107,51 @@ struct MiniPlayerView: View {
                         }
                     }
             )
-            .onReceive(Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()) { _ in
-                if UIApplication.shared.applicationState == .active {
-                    localCurrentTime = player.currentTime
-                }
-            }
-            .transition(.asymmetric(
-                insertion: .move(edge: .bottom).combined(with: .opacity),
-                removal: .opacity
-            ))
+            .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
+}
 
-    @ViewBuilder
-    private func miniPlayerBackground(song: Song) -> some View {
-        MiniPlayerBackgroundView(path: song.coverImageURL?.path)
+/// Progress line that polls the player only while it's on screen and playing.
+/// Lives in its own view so the ticking doesn't re-render the whole mini player,
+/// and it snaps (no backwards sweep) when the song changes.
+struct PlaybackProgressLine: View {
+    let player: MusicPlayerManager
+    let songID: String
+    /// Passed in (not read off `player`) so a play/pause change is a new
+    /// input and SwiftUI re-evaluates the paused state — otherwise the line
+    /// stayed frozen after pressing play.
+    let isPlaying: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 0.25, paused: !isPlaying)) { _ in
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Rectangle()
+                        .fill(.white.opacity(0.08))
+                    Rectangle()
+                        .fill(LinearGradient(colors: [.green, .green.opacity(0.7)], startPoint: .leading, endPoint: .trailing))
+                        .frame(width: geo.size.width * fraction)
+                }
+            }
+        }
+        .transaction { $0.animation = nil }
+        .id(songID)
+        .accessibilityHidden(true)
     }
 
-    private var progressFraction: Double {
-        guard player.duration.isFinite, player.duration > 0, localCurrentTime.isFinite else { return 0 }
-        return min(max(localCurrentTime / player.duration, 0), 1)
+    private var fraction: CGFloat {
+        let duration = player.duration
+        let time = player.currentTime
+        guard duration.isFinite, duration > 0, time.isFinite else { return 0 }
+        return CGFloat(min(max(time / duration, 0), 1))
     }
 }
 
 struct MiniPlayerBackgroundView: View {
     let path: String?
     @State private var uiImage: UIImage?
-    
+
     var body: some View {
         Group {
             if let uiImage = uiImage {
@@ -141,24 +165,21 @@ struct MiniPlayerBackgroundView: View {
                 Color(white: 0.1)
             }
         }
-        .onAppear(perform: load)
-        .onChange(of: path) { load() }
-    }
-    
-    private func load() {
-        guard let path = path else {
-            uiImage = nil
-            return
-        }
-        if let cached = ImageCache.shared.cachedImage(for: path) {
-            uiImage = cached
-            return
-        }
-        DispatchQueue.global(qos: .utility).async {
-            let img = ImageCache.shared.image(for: path)
-            DispatchQueue.main.async {
-                self.uiImage = img
+        // A slow load for an earlier song can't overwrite the current one.
+        .task(id: path) {
+            guard let path else {
+                uiImage = nil
+                return
             }
+            if let cached = ImageCache.shared.cachedThumbnail(for: path, pointSize: 64) {
+                uiImage = cached
+                return
+            }
+            let img = await Task.detached(priority: .utility) {
+                ImageCache.shared.thumbnail(for: path, pointSize: 64)
+            }.value
+            guard !Task.isCancelled else { return }
+            uiImage = img
         }
     }
 }

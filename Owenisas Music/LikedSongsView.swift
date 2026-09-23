@@ -3,7 +3,7 @@ import SwiftData
 
 struct LikedSongsView: View {
     @Query(sort: \SongData.dateAdded, order: .reverse) private var allSongs: [SongData]
-    @ObservedObject var player = MusicPlayerManager.shared
+    private let player = MusicPlayerManager.shared
     @ObservedObject var dataManager = DataManager.shared
 
     var likedSongs: [SongData] {
@@ -132,7 +132,7 @@ struct LikedSongsView: View {
                 .listRowBackground(Color.clear)
                 .frame(maxWidth: .infinity)
             } else {
-                ForEach(Array(zip(likedSongs, songs).enumerated()), id: \.offset) { index, pair in
+                ForEach(Array(zip(likedSongs, songs).enumerated()), id: \.element.0.persistentModelID) { index, pair in
                     let (songData, song) = pair
                     SongRow(song: song, index: index + 1, onRemove: {
                         toggleFavorite(songData: songData)
@@ -144,11 +144,6 @@ struct LikedSongsView: View {
                     .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                 }
 
-                // space for mini player
-                Color.clear
-                    .frame(height: 100)
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
             }
         }
     }

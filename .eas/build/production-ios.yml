@@ -55,12 +55,18 @@ build:
             CODE_SIGN_IDENTITY='Apple Distribution: Tsz To Suen (3LHSL95J9H)' \
             PROVISIONING_PROFILE_SPECIFIER='Owenisas Music Cloud App Store 20260812' \
             OTHER_CODE_SIGN_FLAGS="--keychain $KC" \
+            'SWIFT_ACTIVE_COMPILATION_CONDITIONS=APP_STORE $(inherited)' \
+            OWENISAS_DISTRIBUTION=appstore \
             archive
           APP="$PWD/Owenisas Music.xcarchive/Products/Applications/Owenisas Music.app"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")" = '202608120103'
           test -f "$APP/PrivacyInfo.xcprivacy"
           if strings "$APP/Owenisas Music" | grep -E 'Download Music|Paste a YouTube|youtubei/v1/player'; then
             echo "ERROR: policy-sensitive downloader found in shipping binary"
+            exit 1
+          fi
+          if find "$APP" -iname '*youtube*' | grep .; then
+            echo "ERROR: YouTube resources bundled in shipping app"
             exit 1
           fi
     - run:

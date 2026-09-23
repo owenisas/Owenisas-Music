@@ -2,7 +2,7 @@ import SwiftUI
 import SwiftData
 
 struct SearchView: View {
-    @ObservedObject var player = MusicPlayerManager.shared
+    private let player = MusicPlayerManager.shared
     @ObservedObject var dataManager = DataManager.shared
     @Query(sort: \SongData.dateAdded, order: .reverse) private var allSongs: [SongData]
     @Query(sort: \PlaylistData.dateCreated, order: .reverse) private var playlists: [PlaylistData]
@@ -80,7 +80,6 @@ struct SearchView: View {
                     searchResults
                 }
 
-                Spacer().frame(height: 100)
             }
         }
         .background(Color(UIColor.systemBackground))
@@ -115,7 +114,10 @@ struct SearchView: View {
                         Image(systemName: "xmark.circle.fill")
                             .font(.system(size: 15))
                             .foregroundStyle(.secondary)
+                            .frame(width: 36, height: 36)
+                            .contentShape(Rectangle())
                     }
+                    .accessibilityLabel("Clear search")
                 }
             }
             .padding(.horizontal, 12)
@@ -174,7 +176,10 @@ struct SearchView: View {
                             Image(systemName: "xmark")
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(.secondary)
+                                .frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
                         }
+                        .accessibilityLabel("Remove \(term) from recent searches")
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 4)

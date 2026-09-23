@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @ObservedObject var player = MusicPlayerManager.shared
     @ObservedObject var dataManager = DataManager.shared
+    @ObservedObject private var cloudSync = LibraryCloudSync.shared
     @AppStorage("preferredLyricsLanguage") private var preferredLyricsLanguage = ""
     @State private var showSleepTimerPicker = false
     @State private var customMinutes: String = ""
@@ -12,6 +13,7 @@ struct SettingsView: View {
     @State private var showBackupImporter = false
     @State private var backupResultMessage = ""
     @State private var showBackupResult = false
+    @State private var storageUsed: String?
 
     var body: some View {
         List {
@@ -79,9 +81,15 @@ struct SettingsView: View {
                         Spacer()
 
                         if player.sleepTimerActive {
-                            Text(player.sleepTimerRemainingFormatted)
-                                .font(.system(size: 14, weight: .medium, design: .monospaced))
-                                .foregroundStyle(.green)
+                            Group {
+                                if let end = player.sleepTimerEndDate, end > .now {
+                                    Text(timerInterval: Date.now...end, countsDown: true)
+                                } else {
+                                    Text(player.sleepTimerRemainingFormatted)
+                                }
+                            }
+                            .font(.system(size: 14, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.green)
                         } else {
                             Text("Off")
                                 .font(.system(size: 14))
@@ -122,23 +130,6 @@ struct SettingsView: View {
                 Text("Your Activity")
             }
 
-            // Audio Section
-            Section {
-                HStack {
-                    Label {
-                        Text("Audio Quality")
-                    } icon: {
-                        Image(systemName: "waveform")
-                            .foregroundStyle(.orange)
-                    }
-                    Spacer()
-                    Text("High")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
-                }
-            } header: {
-                Text("Audio")
-            }
 
             // Storage Section
             Section {
@@ -150,7 +141,7 @@ struct SettingsView: View {
                             .foregroundStyle(.blue)
                     }
                     Spacer()
-                    Text(storageUsed)
+                    Text(storageUsed ?? "…")
                         .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                 }
@@ -169,6 +160,8 @@ struct SettingsView: View {
             } header: {
                 Text("Storage")
             }
+
+            iCloudSection
 
             // Your Data Section (local-first: everything exportable, nothing locked in)
             Section {
@@ -257,6 +250,63 @@ struct SettingsView: View {
         } message: {
             Text(backupResultMessage)
         }
+        // Walk the Songs folder once, off the main thread (it ran inside
+        // `body` on every player change and every crossfade-slider step).
+        .task {
+            storageUsed = await Task.detached(priority: .utility) { Self.computeStorageUsed() }.value
+        }
+    }
+
+    // MARK: - iCloud
+    private var iCloudSection: some View {
+        Section {
+            Toggle(isOn: Binding(
+                get: { cloudSync.isEnabled },
+                set: { cloudSync.setEnabled($0) }
+            )) {
+                Label {
+                    Text("Sync with iCloud")
+                } icon: {
+                    Image(systemName: "icloud")
+                        .foregroundStyle(.blue)
+                }
+            }
+            .tint(.green)
+
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Label {
+                    Text("Status")
+                } icon: {
+                    Image(systemName: cloudSync.status.symbolName)
+                        .foregroundStyle(.blue)
+                }
+                Spacer(minLength: 8)
+                Text(cloudSync.status.text)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+            }
+            .accessibilityElement(children: .combine)
+
+            HStack {
+                Label {
+                    Text("Songs in iCloud")
+                } icon: {
+                    Image(systemName: "music.note.list")
+                        .foregroundStyle(.blue)
+                }
+                Spacer()
+                Text(cloudSync.cloudLibrarySummary ?? "—")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+        } header: {
+            Text("iCloud")
+        } footer: {
+            Text("Songs, likes, playlists and play history stay in sync on devices signed in to the same Apple Account. Songs still play from this iPhone; iCloud keeps a copy.")
+        }
+        .onAppear { cloudSync.refreshAvailability() }
     }
 
     private var backupFilename: String {
@@ -360,7 +410,7 @@ struct SettingsView: View {
         return "\(trimmed)×"
     }
 
-    private var storageUsed: String {
+    nonisolated private static func computeStorageUsed() -> String {
         let fm = FileManager.default
         guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return "—" }
         let songsFolder = docs.appendingPathComponent("Songs")

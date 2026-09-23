@@ -3,7 +3,7 @@ import SwiftData
 
 struct ArtistDetailView: View {
     let artistName: String
-    @ObservedObject var player = MusicPlayerManager.shared
+    private let player = MusicPlayerManager.shared
     @ObservedObject var dataManager = DataManager.shared
     @Query(sort: \SongData.dateAdded, order: .reverse) private var allSongs: [SongData]
     @State private var songToAddToPlaylist: SongData?
@@ -33,7 +33,7 @@ struct ArtistDetailView: View {
             }
 
             Section {
-                ForEach(Array(zip(artistSongs, songs).enumerated()), id: \.offset) { index, pair in
+                ForEach(Array(zip(artistSongs, songs).enumerated()), id: \.element.0.persistentModelID) { index, pair in
                     let (songData, song) = pair
                     SongRow(song: song, index: index + 1, onAdd: {
                         songToAddToPlaylist = songData
@@ -45,10 +45,6 @@ struct ArtistDetailView: View {
                     .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                 }
 
-                Color.clear
-                    .frame(height: 100)
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
             }
         }
         .listStyle(.plain)

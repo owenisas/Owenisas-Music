@@ -18,6 +18,10 @@ struct LibraryBackup: Codable {
         var title: String
         var dateCreated: Date
         var songIDs: [String]
+        /// Playlist identity and cover. Optional so older backups still load;
+        /// iCloud sync snapshots always fill them (songIDs in user order).
+        var id: String? = nil
+        var coverImagePath: String? = nil
     }
 
     var version: Int = 1

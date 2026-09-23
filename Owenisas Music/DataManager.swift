@@ -68,6 +68,11 @@ class DataManager: ObservableObject {
         if let song = (try? ctx.fetch(descriptor))?.first {
             song.isFavorited.toggle()
             try? ctx.save()
+            NotificationCenter.default.post(
+                name: .libraryFavoriteChanged,
+                object: self,
+                userInfo: ["id": song.id, "isFavorited": song.isFavorited]
+            )
         }
     }
 
@@ -126,6 +131,7 @@ class DataManager: ObservableObject {
         } catch {
             print("[DEBUG] DataManager: Failed saving sync changes: \(error.localizedDescription)")
         }
+        NotificationCenter.default.post(name: .librarySongIndexed, object: self)
     }
 
     private func normalizedSongID(_ id: String) -> String {
@@ -323,9 +329,7 @@ class DataManager: ObservableObject {
         let audioExts = ["mp3", "wav", "m4a", "aac", "flac", "aiff", "aif"]
 
         for file in contents where audioExts.contains(file.pathExtension.lowercased()) {
-            let attr = (try? fileManager.attributesOfItem(atPath: file.path)) ?? [:]
-            let size = attr[.size] as? Int64 ?? 0
-            if size > 500_000 {
+            if PlayableLocalAudio.isPlayable(at: file) {
                 return file
             }
         }
@@ -333,9 +337,15 @@ class DataManager: ObservableObject {
         return nil
     }
 
-    /// Surgically syncs a single song folder. Much faster for incremental updates.
+    /// Surgically syncs a single song folder. Much faster for incremental updates:
+    /// only this folder is read and only rows that could be this song are fetched.
     func syncSingleSong(folderName rawFolderName: String) {
         syncSingleSong(folderName: rawFolderName, shouldDeduplicate: true)
+        NotificationCenter.default.post(
+            name: .librarySongIndexed,
+            object: self,
+            userInfo: ["folder": rawFolderName.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)]
+        )
     }
 
     private func syncSingleSong(folderName rawFolderName: String, shouldDeduplicate: Bool) {
@@ -344,10 +354,6 @@ class DataManager: ObservableObject {
         let fm = FileManager.default
         guard let docs = fm.urls(for: FileManager.SearchPathDirectory.documentDirectory, in: FileManager.SearchPathDomainMask.userDomainMask).first else { return }
         let songFolder = docs.appendingPathComponent("Songs").appendingPathComponent(folderName)
-
-        if shouldDeduplicate {
-            deduplicateSongData(in: ctx)
-        }
 
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: songFolder.path, isDirectory: &isDir), isDir.boolValue else { return }
@@ -360,7 +366,11 @@ class DataManager: ObservableObject {
 
         let audioFile = firstValidAudioFile(in: contents, fileManager: fm)
         let coverFile = contents.first { imageExts.contains($0.pathExtension.lowercased()) }
-        let subtitleFile = contents.first { subExts.contains($0.pathExtension.lowercased()) }
+        // Prefer synced lyrics, then any VTT, so the default subtitle does not
+        // flip with directory order between syncs.
+        let subtitleFile = contents.first { $0.lastPathComponent.lowercased().hasSuffix(".lyrics.vtt") }
+            ?? contents.first { $0.pathExtension.lowercased() == "vtt" }
+            ?? contents.first { subExts.contains($0.pathExtension.lowercased()) }
 
         guard let audio = audioFile else { return }
 
@@ -370,42 +380,84 @@ class DataManager: ObservableObject {
         let coverRelPath = coverFile != nil ? "Songs/\(folderName)/\(coverFile!.lastPathComponent)" : nil
         let subtitleRelPath = subtitleFile != nil ? "Songs/\(folderName)/\(subtitleFile!.lastPathComponent)" : nil
 
-        let descriptor = FetchDescriptor<SongData>(predicate: #Predicate { $0.id == folderName })
-        let matchingSongs = ((try? ctx.fetch(descriptor)) ?? []).sorted { lhs, rhs in
+        let matchingSongs: [SongData]
+        if shouldDeduplicate {
+            // Canonically-equivalent spellings of this folder's id (NFC/NFD,
+            // stray whitespace) are the only rows that can be duplicates of it.
+            let candidateIDs = Array(Set([
+                rawFolderName,
+                folderName,
+                rawFolderName.decomposedStringWithCanonicalMapping,
+                folderName.decomposedStringWithCanonicalMapping,
+            ]))
+            let descriptor = FetchDescriptor<SongData>(predicate: #Predicate { candidateIDs.contains($0.id) })
+            matchingSongs = ((try? ctx.fetch(descriptor)) ?? [])
+                .filter { normalizedSongIDKey($0.id) == normalizedSongIDKey(folderName) }
+        } else {
+            let descriptor = FetchDescriptor<SongData>(predicate: #Predicate { $0.id == folderName })
+            matchingSongs = (try? ctx.fetch(descriptor)) ?? []
+        }
+        let sortedMatches = matchingSongs.sorted { lhs, rhs in
             let lhsExact = hasSameStoredString(lhs.id, folderName)
             let rhsExact = hasSameStoredString(rhs.id, folderName)
             if lhsExact != rhsExact { return lhsExact }
+            if lhs.isFavorited != rhs.isFavorited { return lhs.isFavorited }
             return lhs.dateAdded < rhs.dateAdded
         }
-        if let existing = matchingSongs.first {
-            for duplicate in matchingSongs.dropFirst() {
+        if let existing = sortedMatches.first {
+            for duplicate in sortedMatches.dropFirst() {
                 mergeSongData(from: duplicate, into: existing)
                 print("[DEBUG] DataManager: Removing duplicate database entry: \(duplicate.id)")
                 ctx.delete(duplicate)
             }
+            if !hasSameStoredString(existing.id, folderName) { existing.id = folderName }
             if existing.audioFilePath != audioRelPath { existing.audioFilePath = audioRelPath }
             if existing.coverImagePath != coverRelPath { existing.coverImagePath = coverRelPath }
             if existing.subtitleFilePath != subtitleRelPath { existing.subtitleFilePath = subtitleRelPath }
             if abs(existing.dateAdded.timeIntervalSince(inferredDateAdded)) > 1 {
                 existing.dateAdded = inferredDateAdded
             }
+            // Repair rows that were indexed from the folder name alone (for
+            // example a video-ID folder after the store was lost) when the
+            // folder carries real metadata.
+            let looksLikePlaceholder = existing.artist == "Unknown Artist"
+                && (existing.title == folderName || existing.title.isEmpty)
+            if looksLikePlaceholder || existing.duration <= 0,
+               let meta = SongFolderMetadata.read(from: songFolder) {
+                if looksLikePlaceholder {
+                    SongFolderMetadata.apply(meta, to: existing)
+                } else if let duration = meta.duration, duration > 0 {
+                    existing.duration = duration
+                }
+            }
         } else {
             var title = folderName
             var artist = "Unknown Artist"
-            
-            let parts = folderName.components(separatedBy: " - ")
-            if parts.count >= 2 {
-                artist = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
-                title = parts.dropFirst().joined(separator: " - ").trimmingCharacters(in: .whitespacesAndNewlines)
+            var album = "Unknown Album"
+            var duration: TimeInterval = 0
+
+            if let meta = SongFolderMetadata.read(from: songFolder) {
+                title = meta.title
+                artist = meta.artist ?? artist
+                album = meta.album ?? album
+                duration = meta.duration ?? 0
+            } else {
+                let parts = folderName.components(separatedBy: " - ")
+                if parts.count >= 2 {
+                    artist = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                    title = parts.dropFirst().joined(separator: " - ").trimmingCharacters(in: .whitespacesAndNewlines)
+                }
             }
-            
+
             let song = SongData(
                 id: folderName,
                 title: title,
                 artist: artist,
+                albumTitle: album,
                 audioFilePath: audioRelPath,
                 coverImagePath: coverRelPath,
                 subtitleFilePath: subtitleRelPath,
+                duration: duration,
                 dateAdded: inferredDateAdded
             )
             ctx.insert(song)
@@ -482,15 +534,49 @@ class DataManager: ObservableObject {
         }
     }
 
+    /// Appends songs in the given order. SwiftData doesn't keep to-many
+    /// order, so the order is also recorded in `songOrder`.
+    func appendSongsInOrder(_ songs: [SongData], to playlist: PlaylistData) {
+        let existing = playlist.songOrder ?? []
+        var order = existing.isEmpty ? playlist.orderedSongs.map(\.id) : existing
+        var changed = false
+        for song in songs {
+            if !playlist.songs.contains(where: { $0.id == song.id }) {
+                playlist.songs.append(song)
+                changed = true
+            }
+            if !order.contains(song.id) {
+                order.append(song.id)
+            }
+        }
+        if order != existing {
+            playlist.songOrder = order
+            changed = true
+        }
+        if changed {
+            try? modelContext?.save()
+            NotificationCenter.default.post(name: .init("PlaylistsChanged"), object: nil)
+        }
+    }
+
     func removeSong(_ song: SongData, from playlist: PlaylistData) {
         playlist.songs.removeAll { $0.id == song.id }
+        // Forget its slot so re-adding it lands at the end, not its old spot.
+        playlist.songOrder?.removeAll { $0 == song.id }
         try? modelContext?.save()
         NotificationCenter.default.post(name: .init("PlaylistsChanged"), object: nil)
     }
 
     func deletePlaylist(_ playlist: PlaylistData) {
+        let deletedID = playlist.id
+        let deletedTitle = playlist.title
         modelContext?.delete(playlist)
         try? modelContext?.save()
+        NotificationCenter.default.post(
+            name: .libraryPlaylistDeleted,
+            object: self,
+            userInfo: ["id": deletedID, "title": deletedTitle]
+        )
         NotificationCenter.default.post(name: .init("PlaylistsChanged"), object: nil)
     }
 
@@ -538,19 +624,23 @@ class DataManager: ObservableObject {
         let fm = FileManager.default
         guard let docs = fm.urls(for: FileManager.SearchPathDirectory.documentDirectory, in: FileManager.SearchPathDomainMask.userDomainMask).first else { return }
 
+        var deletedIDs: [String] = []
         for song in songs {
+            deletedIDs.append(song.id)
             // Stop playback
             MusicPlayerManager.shared.stopAndRemoveFromQueue(songId: song.id)
-            
+
             // Filesystem removal
             let songFolder = docs.appendingPathComponent("Songs").appendingPathComponent(song.id)
             try? fm.removeItem(at: songFolder)
-            
+
             // Database removal
             ctx.delete(song)
         }
-        
+
         try? ctx.save()
+        // An explicit user delete: iCloud sync records a tombstone for these.
+        NotificationCenter.default.post(name: .librarySongsDeleted, object: self, userInfo: ["ids": deletedIDs])
         NotificationCenter.default.post(name: .init("SongsFolderChanged"), object: nil)
     }
 
@@ -709,6 +799,7 @@ class DataManager: ObservableObject {
             print("[DEBUG] DataManager: Backup import save failed: \(error.localizedDescription)")
             return nil
         }
+        NotificationCenter.default.post(name: .libraryBackupImported, object: self)
         NotificationCenter.default.post(name: .init("PlaylistsChanged"), object: nil)
         return LibraryBackupImportResult(
             matchedSongs: matchedSongs,
@@ -727,3 +818,100 @@ class DataManager: ObservableObject {
     }
 }
 
+// MARK: - Per-folder metadata (Documents/Songs/<id>/meta.json)
+
+/// Small sidecar written next to downloaded audio so the library can be
+/// rebuilt from the file system alone (the SwiftData store can be lost or
+/// fall back to memory). Folders without it keep the "Artist - Title"
+/// folder-name parsing.
+struct SongFolderMetadata: Codable, Equatable {
+    static let fileName = "meta.json"
+
+    var title: String
+    var artist: String?
+    var album: String?
+    var videoId: String?
+    var duration: Double?
+    var source: String?
+
+    init(title: String, artist: String? = nil, album: String? = nil,
+         videoId: String? = nil, duration: Double? = nil, source: String? = nil) {
+        self.title = title
+        self.artist = artist
+        self.album = album
+        self.videoId = videoId
+        self.duration = duration
+        self.source = source
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        title = try c.decode(String.self, forKey: .title)
+        artist = try? c.decodeIfPresent(String.self, forKey: .artist)
+        album = try? c.decodeIfPresent(String.self, forKey: .album)
+        videoId = try? c.decodeIfPresent(String.self, forKey: .videoId)
+        if let number = try? c.decodeIfPresent(Double.self, forKey: .duration) {
+            duration = number
+        } else if let text = try? c.decodeIfPresent(String.self, forKey: .duration) {
+            duration = Double(text)
+        } else {
+            duration = nil
+        }
+        source = try? c.decodeIfPresent(String.self, forKey: .source)
+    }
+
+    /// Parses meta.json content. Nil for malformed JSON or an empty title.
+    static func parse(_ data: Data) -> SongFolderMetadata? {
+        guard var meta = try? JSONDecoder().decode(SongFolderMetadata.self, from: data) else { return nil }
+        meta.title = meta.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !meta.title.isEmpty else { return nil }
+        if let artist = meta.artist?.trimmingCharacters(in: .whitespacesAndNewlines) {
+            meta.artist = artist.isEmpty ? nil : artist
+        }
+        if let album = meta.album?.trimmingCharacters(in: .whitespacesAndNewlines) {
+            meta.album = album.isEmpty ? nil : album
+        }
+        if let duration = meta.duration, !(duration.isFinite && duration > 0) {
+            meta.duration = nil
+        }
+        return meta
+    }
+
+    static func read(from folder: URL) -> SongFolderMetadata? {
+        let url = folder.appendingPathComponent(fileName)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return parse(data)
+    }
+
+    func write(to folder: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(self)
+        try data.write(to: folder.appendingPathComponent(Self.fileName), options: .atomic)
+    }
+
+    static func apply(_ meta: SongFolderMetadata, to song: SongData) {
+        song.title = meta.title
+        if let artist = meta.artist { song.artist = artist }
+        if let album = meta.album { song.albumTitle = album }
+        if let duration = meta.duration, duration > 0 { song.duration = duration }
+    }
+}
+
+
+// MARK: - Library change notifications (posted with `object:` the DataManager)
+
+extension Notification.Name {
+    /// A song folder was (re)indexed: downloaded, imported, or given new
+    /// files. `userInfo["folder"]` is the folder name; absent after a full
+    /// `syncFromFileSystem` pass.
+    static let librarySongIndexed = Notification.Name("LibrarySongIndexed")
+    /// The user deleted songs. `userInfo["ids"]` is `[String]`.
+    static let librarySongsDeleted = Notification.Name("LibrarySongsDeleted")
+    /// A like changed. `userInfo["id"]: String`, `userInfo["isFavorited"]: Bool`.
+    static let libraryFavoriteChanged = Notification.Name("LibraryFavoriteChanged")
+    /// The user deleted a playlist. `userInfo["id"]`, `userInfo["title"]`.
+    static let libraryPlaylistDeleted = Notification.Name("LibraryPlaylistDeleted")
+    /// A library backup was restored into the store.
+    static let libraryBackupImported = Notification.Name("LibraryBackupImported")
+}

@@ -2,15 +2,22 @@ import SwiftUI
 import SwiftData
 
 struct MostPlayedView: View {
-    @ObservedObject var player = MusicPlayerManager.shared
+    private let player = MusicPlayerManager.shared
     @ObservedObject var dataManager = DataManager.shared
     @Query(sort: \SongData.dateAdded, order: .reverse) private var allSongs: [SongData]
     @State private var songToAddToPlaylist: SongData?
 
-    private var mostPlayed: [SongData] {
+    /// Order captured on appear so rows don't jump while you tap through them.
+    @State private var frozenOrder: [String]?
+
+    private var liveMostPlayed: [SongData] {
         allSongs
             .filter { $0.playCount > 0 }
             .sorted { $0.playCount > $1.playCount }
+    }
+
+    private var mostPlayed: [SongData] {
+        liveMostPlayed.ordered(like: frozenOrder)
     }
 
     private var songs: [Song] {
@@ -37,7 +44,7 @@ struct MostPlayedView: View {
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
                 } else {
-                    ForEach(Array(zip(mostPlayed, songs).enumerated()), id: \.offset) { index, pair in
+                    ForEach(Array(zip(mostPlayed, songs).enumerated()), id: \.element.0.persistentModelID) { index, pair in
                         let (songData, song) = pair
                         SongRow(song: song, index: index + 1, onAdd: {
                             songToAddToPlaylist = songData
@@ -49,16 +56,13 @@ struct MostPlayedView: View {
                         .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                     }
 
-                    Color.clear
-                        .frame(height: 100)
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
                 }
             }
         }
         .listStyle(.plain)
         .background(Color(UIColor.systemBackground))
         .navigationTitle("Most Played")
+        .onAppear { frozenOrder = liveMostPlayed.map(\.id) }
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $songToAddToPlaylist) { songData in
             AddToPlaylistView(song: songData)

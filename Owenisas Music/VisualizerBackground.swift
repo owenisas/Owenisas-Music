@@ -7,25 +7,43 @@ final class ImageCache {
     static let shared = ImageCache()
     private var cache = NSCache<NSString, UIImage>()
     private var colorCache = NSCache<NSString, ColorCacheWrapper>()
+    // Touched from background loaders and the main thread at once — guard it.
     private var failedPaths = Set<String>() // avoid re-trying broken images
+    private let failedLock = NSLock()
 
     init() {
-        cache.countLimit = 50
+        cache.countLimit = 200
         cache.totalCostLimit = 80 * 1024 * 1024 // 80MB
         colorCache.countLimit = 50
+    }
+
+    private func hasFailed(_ path: String) -> Bool {
+        failedLock.lock(); defer { failedLock.unlock() }
+        return failedPaths.contains(path)
+    }
+
+    private func markFailed(_ path: String) {
+        failedLock.lock(); failedPaths.insert(path); failedLock.unlock()
+    }
+
+    private static func cost(of image: UIImage) -> Int {
+        guard let cg = image.cgImage else { return 1 }
+        return cg.bytesPerRow * cg.height
     }
 
     func cachedImage(for path: String) -> UIImage? {
         return cache.object(forKey: path as NSString)
     }
 
+    /// Full-size cover, decoded off the caller's thread so drawing it on the
+    /// main thread doesn't stall a song change.
     func image(for path: String) -> UIImage? {
         let key = path as NSString
         if let cached = cache.object(forKey: key) {
             return cached
         }
         // Don't retry paths that already failed
-        if failedPaths.contains(path) { return nil }
+        if hasFailed(path) { return nil }
 
         // Try standard loading first, then Data-based (handles WebP/unknown formats)
         var image = UIImage(contentsOfFile: path)
@@ -33,11 +51,50 @@ final class ImageCache {
             image = UIImage(data: data)
         }
         guard let img = image else {
-            failedPaths.insert(path)
+            markFailed(path)
             return nil
         }
-        cache.setObject(img, forKey: key)
-        return img
+        let decoded = img.preparingForDisplay() ?? img
+        cache.setObject(decoded, forKey: key, cost: Self.cost(of: decoded))
+        return decoded
+    }
+
+    private static func thumbnailKey(_ path: String, _ maxPixel: Int) -> NSString {
+        "\(path)#thumb\(maxPixel)" as NSString
+    }
+
+    func cachedThumbnail(for path: String, pointSize: CGFloat) -> UIImage? {
+        cache.object(forKey: Self.thumbnailKey(path, Self.maxPixel(for: pointSize)))
+    }
+
+    /// Downsampled cover for list rows / mini player (a 48pt row doesn't need
+    /// a 1280px decode).
+    func thumbnail(for path: String, pointSize: CGFloat) -> UIImage? {
+        let maxPixel = Self.maxPixel(for: pointSize)
+        let key = Self.thumbnailKey(path, maxPixel)
+        if let cached = cache.object(forKey: key) { return cached }
+        if hasFailed(path) { return nil }
+        let url = URL(fileURLWithPath: path) as CFURL
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel
+        ]
+        guard let source = CGImageSourceCreateWithURL(url, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            // Formats ImageIO can't thumbnail (rare): fall back to a full decode.
+            return image(for: path)
+        }
+        let thumb = UIImage(cgImage: cg)
+        cache.setObject(thumb, forKey: key, cost: Self.cost(of: thumb))
+        return thumb
+    }
+
+    private static func maxPixel(for pointSize: CGFloat) -> Int {
+        // Bucket so nearby sizes share one cached thumbnail.
+        let pixels = Int(pointSize * 3)
+        return max(64, ((pixels + 63) / 64) * 64)
     }
 
     func colors(for path: String) -> UIImage.DominantColors? {
@@ -51,7 +108,7 @@ final class ImageCache {
     func clear() {
         cache.removeAllObjects()
         colorCache.removeAllObjects()
-        failedPaths.removeAll()
+        failedLock.lock(); failedPaths.removeAll(); failedLock.unlock()
     }
 }
 
@@ -96,30 +153,29 @@ struct CachedCoverImage: View {
                     )
             }
         }
-        .onAppear {
-            loadImage()
-        }
-        .onChange(of: path) {
-            loadImage()
+        // Keyed on the path: a new song clears the old art immediately and a
+        // slow load for a previous song can't land after a newer one.
+        .task(id: path) {
+            await loadImage()
         }
     }
 
-    private func loadImage() {
+    private func loadImage() async {
         guard let path = path else {
-            self.uiImage = nil
+            uiImage = nil
             return
         }
-        if let cached = ImageCache.shared.cachedImage(for: path) {
-            self.uiImage = cached
+        if let cached = ImageCache.shared.cachedThumbnail(for: path, pointSize: size) {
+            uiImage = cached
             return
         }
-        
-        DispatchQueue.global(qos: .utility).async {
-            guard let img = ImageCache.shared.image(for: path) else { return }
-            DispatchQueue.main.async {
-                self.uiImage = img
-            }
-        }
+        uiImage = nil
+        let pointSize = size
+        let img = await Task.detached(priority: .utility) {
+            ImageCache.shared.thumbnail(for: path, pointSize: pointSize)
+        }.value
+        guard !Task.isCancelled else { return }
+        uiImage = img
     }
 }
 
