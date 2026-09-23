@@ -1,0 +1,132 @@
+build:
+  name: Owenisas Music iOS App Store Release
+  steps:
+    - eas/checkout
+    - run:
+        name: Verify non-beta Xcode 26.4
+        command: |
+          set -eo pipefail
+          XCODE_VERSION="$(xcodebuild -version)"
+          printf '%s\n' "$XCODE_VERSION"
+          if [[ "$XCODE_VERSION" == *[Bb][Ee][Tt][Aa]* ]]; then
+            echo "ERROR: beta Xcode detected; refusing App Store archive."
+            exit 1
+          fi
+          case "$XCODE_VERSION" in
+            'Xcode 26.4'* ) ;;
+            * )
+              echo "ERROR: expected release Xcode 26.4.x."
+              exit 1
+              ;;
+          esac
+    - run:
+        name: Import distribution certificate
+        command: |
+          set -eo pipefail
+          : "${OWENISAS_MUSIC_P12_B64:?missing OWENISAS_MUSIC_P12_B64}"
+          : "${OWENISAS_MUSIC_P12_PASSWORD:?missing OWENISAS_MUSIC_P12_PASSWORD}"
+          KC="$PWD/owenisas-music-ci.keychain-db"
+          security create-keychain -p ci "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p ci "$KC"
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | sed s/\"//g)
+          echo "$OWENISAS_MUSIC_P12_B64" | base64 -D > "$PWD/owenisas-music-dist.p12"
+          security import "$PWD/owenisas-music-dist.p12" -k "$KC" -P "$OWENISAS_MUSIC_P12_PASSWORD" -A -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k ci "$KC" >/dev/null
+          security find-identity -v -p codesigning "$KC"
+          rm -f "$PWD/owenisas-music-dist.p12"
+    - run:
+        name: Write App Store Connect API key
+        command: |
+          set -eo pipefail
+          : "${OWENISAS_MUSIC_ASC_KEY_ID:?missing OWENISAS_MUSIC_ASC_KEY_ID}"
+          : "${OWENISAS_MUSIC_ASC_ISSUER_ID:?missing OWENISAS_MUSIC_ASC_ISSUER_ID}"
+          : "${OWENISAS_MUSIC_ASC_P8_B64:?missing OWENISAS_MUSIC_ASC_P8_B64}"
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          echo "$OWENISAS_MUSIC_ASC_P8_B64" | base64 -D > "$HOME/.appstoreconnect/private_keys/AuthKey_${OWENISAS_MUSIC_ASC_KEY_ID}.p8"
+    - run:
+        name: Archive Owenisas Music
+        command: |
+          set -eo pipefail
+          # Automatic signing through the API key: the app has iCloud + App Group
+          # entitlements and three embedded targets (share extension, widget,
+          # watch app), which a single hand-made profile can't cover.
+          KC="$PWD/owenisas-music-ci.keychain-db"
+          security unlock-keychain -p ci "$KC"
+          KEY="$HOME/.appstoreconnect/private_keys/AuthKey_${OWENISAS_MUSIC_ASC_KEY_ID}.p8"
+          xcodebuild -project 'Owenisas Music.xcodeproj' -scheme 'Owenisas Music' -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/Owenisas Music.xcarchive" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY" \
+            -authenticationKeyID "$OWENISAS_MUSIC_ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$OWENISAS_MUSIC_ASC_ISSUER_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM=3LHSL95J9H \
+            OTHER_CODE_SIGN_FLAGS="--keychain $KC" \
+            'SWIFT_ACTIVE_COMPILATION_CONDITIONS=APP_STORE $(inherited)' \
+            OWENISAS_DISTRIBUTION=appstore \
+            archive
+          APP="$PWD/Owenisas Music.xcarchive/Products/Applications/Owenisas Music.app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")" = '202608120103'
+          test -f "$APP/PrivacyInfo.xcprivacy"
+          # Scan the app and every embedded executable (extensions, watch app).
+          while IFS= read -r BIN; do
+            if strings "$BIN" | grep -E 'Download Music|Paste a YouTube|youtubei/v1/player'; then
+              echo "ERROR: policy-sensitive downloader found in shipping binary: $BIN"
+              exit 1
+            fi
+          done < <(find "$APP" -type f -perm +111)
+          if find "$APP" -iname '*youtube*' | grep .; then
+            echo "ERROR: YouTube resources bundled in shipping app"
+            exit 1
+          fi
+          if /usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionAttributes:NSExtensionActivationRule' \
+               "$APP/PlugIns/OwenisasShare.appex/Info.plist" | grep -qE 'public\.(url|plain-text)'; then
+            echo "ERROR: App Store share extension accepts links"
+            exit 1
+          fi
+    - run:
+        name: Export Owenisas Music IPA
+        command: |
+          set -eo pipefail
+          KC="$PWD/owenisas-music-ci.keychain-db"
+          security unlock-keychain -p ci "$KC"
+          KEY="$HOME/.appstoreconnect/private_keys/AuthKey_${OWENISAS_MUSIC_ASC_KEY_ID}.p8"
+          cat > "$PWD/ExportOptions.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>destination</key><string>export</string>
+            <key>method</key><string>app-store-connect</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>teamID</key><string>3LHSL95J9H</string>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath "$PWD/Owenisas Music.xcarchive" \
+            -exportPath "$PWD/export" \
+            -exportOptionsPlist "$PWD/ExportOptions.plist" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY" \
+            -authenticationKeyID "$OWENISAS_MUSIC_ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$OWENISAS_MUSIC_ASC_ISSUER_ID" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $KC"
+    - eas/upload_artifact:
+        name: Upload Owenisas Music IPA artifact
+        inputs:
+          type: application-archive
+          path: export/*.ipa
+    - run:
+        name: Validate and upload to App Store Connect
+        command: |
+          set -eo pipefail
+          : "${OWENISAS_MUSIC_ASC_KEY_ID:?missing OWENISAS_MUSIC_ASC_KEY_ID}"
+          : "${OWENISAS_MUSIC_ASC_ISSUER_ID:?missing OWENISAS_MUSIC_ASC_ISSUER_ID}"
+          : "${OWENISAS_MUSIC_ASC_P8_B64:?missing OWENISAS_MUSIC_ASC_P8_B64}"
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          echo "$OWENISAS_MUSIC_ASC_P8_B64" | base64 -D > "$HOME/.appstoreconnect/private_keys/AuthKey_${OWENISAS_MUSIC_ASC_KEY_ID}.p8"
+          set -- "$PWD/export"/*.ipa
+          IPA="$1"
+          xcrun altool --validate-app -f "$IPA" -t ios --apiKey "$OWENISAS_MUSIC_ASC_KEY_ID" --apiIssuer "$OWENISAS_MUSIC_ASC_ISSUER_ID"
+          xcrun altool --upload-app -f "$IPA" -t ios --apiKey "$OWENISAS_MUSIC_ASC_KEY_ID" --apiIssuer "$OWENISAS_MUSIC_ASC_ISSUER_ID"
