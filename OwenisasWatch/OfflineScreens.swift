@@ -171,8 +171,7 @@ struct DownloadProgressView: View {
             Label("Downloading", systemImage: "arrow.down.circle")
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(Color.owenisasGreen)
-            ProgressView(value: progress.fraction)
-                .tint(.owenisasGreen)
+            WatchProgressBar(fraction: progress.fraction)
             Text("\(progress.received) of \(progress.total) · \(WatchStorage.format(progress.receivedBytes)) of \(WatchStorage.format(progress.totalBytes))")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -316,8 +315,7 @@ struct CollectionRowView: View {
         case .notDownloaded:
             EmptyView()
         case .downloading(let p):
-            ProgressView(value: p.fraction)
-                .tint(.owenisasGreen)
+            WatchProgressBar(fraction: p.fraction)
         case .downloaded(let p), .incomplete(let p):
             Text("\(p.received) songs · \(WatchStorage.format(p.receivedBytes))")
                 .font(.footnote)

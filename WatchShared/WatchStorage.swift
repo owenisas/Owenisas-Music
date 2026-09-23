@@ -47,7 +47,10 @@ enum WatchStorage {
     }
 
     static func format(_ bytes: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: max(0, bytes), countStyle: .file)
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        formatter.allowsNonnumericFormatting = false // "0 KB", not "Zero KB"
+        return formatter.string(fromByteCount: max(0, bytes))
     }
 }
 

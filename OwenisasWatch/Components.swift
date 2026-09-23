@@ -199,9 +199,11 @@ struct NowPlayingRowView: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
-            Image(systemName: isPlaying ? "waveform" : "pause.fill")
+            // Status, not a button: a pause glyph here read as "tap to pause".
+            Image(systemName: "waveform")
                 .font(.footnote)
-                .foregroundStyle(Color.owenisasGreen)
+                .foregroundStyle(isPlaying ? Color.owenisasGreen : Color.secondary)
+                .symbolEffect(.variableColor.iterative, isActive: isPlaying)
                 .accessibilityLabel(isPlaying ? "Playing" : "Paused")
         }
     }
@@ -260,8 +262,7 @@ struct PlaybackProgressView: View {
 
     var body: some View {
         VStack(spacing: 2) {
-            ProgressView(value: duration > 0 ? min(elapsed / duration, 1) : 0)
-                .tint(.owenisasGreen)
+            WatchProgressBar(fraction: duration > 0 ? min(elapsed / duration, 1) : 0)
             HStack {
                 Text(formatTime(elapsed))
                 Spacer()
@@ -272,6 +273,25 @@ struct PlaybackProgressView: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(formatTime(elapsed)) of \(formatTime(duration))")
+    }
+}
+
+/// Thin progress bar with a neutral track. The system ProgressView tints its
+/// track green too, which on the green backdrop read as "full" at 0%.
+struct WatchProgressBar: View {
+    let fraction: Double
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(0.2))
+                Capsule()
+                    .fill(Color.owenisasGreen)
+                    .frame(width: geo.size.width * CGFloat(min(max(fraction.isFinite ? fraction : 0, 0), 1)))
+            }
+        }
+        .frame(height: 5)
+        .accessibilityHidden(true)
     }
 }
 
