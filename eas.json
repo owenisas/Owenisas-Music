@@ -5,6 +5,16 @@
     "requireCommit": false
   },
   "build": {
+    "testflight": {
+      "distribution": "store",
+      "environment": "production",
+      "ios": {
+        "image": "macos-tahoe-26.4-xcode-26.4",
+        "credentialsSource": "local",
+        "withoutCredentials": true,
+        "config": "testflight-ios.yml"
+      }
+    },
     "production": {
       "distribution": "store",
       "ios": {

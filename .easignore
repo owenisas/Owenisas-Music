@@ -47,5 +47,6 @@ fastlane/report.xml
 !.eas/
 !.eas/build/
 !.eas/build/production-ios.yml
+!.eas/build/testflight-ios.yml
 !.eas/build/install-profiles.py
 !.eas/build/validate-app-intents.py
