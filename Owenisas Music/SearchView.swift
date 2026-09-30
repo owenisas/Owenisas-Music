@@ -39,30 +39,6 @@ struct SearchView: View {
         recentSearchHistoryRaw = ""
     }
 
-    private var filteredSongs: [SongData] {
-        guard !searchText.isEmpty else { return [] }
-        return allSongs.filter {
-            $0.title.localizedCaseInsensitiveContains(searchText) ||
-            $0.artist.localizedCaseInsensitiveContains(searchText) ||
-            $0.albumTitle.localizedCaseInsensitiveContains(searchText)
-        }
-    }
-
-    private var filteredArtists: [String] {
-        guard !searchText.isEmpty else { return [] }
-        let artists = Set(allSongs.map(\.artist))
-        return artists
-            .filter { $0.localizedCaseInsensitiveContains(searchText) }
-            .sorted()
-    }
-
-    private var filteredPlaylists: [PlaylistData] {
-        guard !searchText.isEmpty else { return [] }
-        return playlists.filter {
-            $0.title.localizedCaseInsensitiveContains(searchText)
-        }
-    }
-
     private var uniqueArtists: [(name: String, songCount: Int, coverURL: URL?)] {
         let grouped = Dictionary(grouping: allSongs, by: \.artist)
         return grouped.map { (name: $0.key, songCount: $0.value.count, coverURL: $0.value.first?.coverImageURL) }
@@ -284,7 +260,11 @@ struct SearchView: View {
 
     // MARK: - Search Results
     private var searchResults: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        let results = LibrarySearchResults(songs: allSongs, playlists: playlists, text: searchText)
+        let filteredSongs = results.songs
+        let filteredArtists = results.artists
+        let filteredPlaylists = results.playlists
+        return VStack(alignment: .leading, spacing: 20) {
             if filteredSongs.isEmpty && filteredArtists.isEmpty && filteredPlaylists.isEmpty {
                 VStack(spacing: 12) {
                     Spacer().frame(height: 60)

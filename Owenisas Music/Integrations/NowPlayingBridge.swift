@@ -87,6 +87,11 @@ final class NowPlayingBridge {
             }
         }
         switch command {
+        case .play:
+            if !player.isPlaying { player.togglePlayPause() }
+        case .pause: player.pause()
+        case .likeCurrent:
+            if player.currentSong?.isFavorited == false { player.toggleFavorite() }
         case .togglePlayPause: player.togglePlayPause()
         case .next: player.next()
         case .previous: player.previous()

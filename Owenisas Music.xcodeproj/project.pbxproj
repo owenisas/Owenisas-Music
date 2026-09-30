@@ -13,6 +13,10 @@
 		CF103FD7E01666BC70723F88 /* OwenisasShare.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0EF4AAC0680ECDD4001D8F32 /* OwenisasShare.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		EFBCB04F1659AF81FA6511E7 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 896DE32C99CDD28F0BF851E1 /* Foundation.framework */; };
 		FF3BF75F5466D7A0FFAB6E1F /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2FCC3BAFCF8C458D1D9A7E0A /* Foundation.framework */; };
+		6208728711049D0F87C938C6 /* WatchWidgetSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AF7675CF1DB1CFE32BA07CB /* WatchWidgetSnapshot.swift */; };
+		CD372D4441583223C0DA0FC6 /* WatchWidgetStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC24B46F4D6C9771E48A0D41 /* WatchWidgetStore.swift */; };
+		EEDA80659DF978D4F7656927 /* WatchWidgetPlaybackIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 082FFFF8C5CDFF92BB7D835A /* WatchWidgetPlaybackIntent.swift */; };
+		C2607A3DBFD4860690369666 /* OwenisasWatchWidget.appex in Embed Watch Widgets */ = {isa = PBXBuildFile; fileRef = 4F9684EB2AD3324AF4C422AF /* OwenisasWatchWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -51,6 +55,7 @@
 			remoteGlobalIDString = 499CD89BAC327B800EA5BBAD;
 			remoteInfo = OwenisasShare;
 		};
+		C47CB5E0B1C60F5EB87D6549 /* PBXContainerItemProxy */ = {isa = PBXContainerItemProxy; containerPortal = 6EA446E12DAF4ECF00E36322; proxyType = 1; remoteGlobalIDString = 19183C78E367116D2841BB48; remoteInfo = OwenisasWatchWidget; };
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -77,6 +82,7 @@
 			name = "Embed Watch Content";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		DED513D31B183B8837290763 /* Embed Watch Widgets */ = {isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = ""; dstSubfolderSpec = 13; files = (C2607A3DBFD4860690369666 /* OwenisasWatchWidget.appex in Embed Watch Widgets */, ); name = "Embed Watch Widgets"; runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
@@ -88,6 +94,10 @@
 		6EA447002DAF4ED200E36322 /* Owenisas MusicUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Owenisas MusicUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		896DE32C99CDD28F0BF851E1 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		C62478F0B92F33A5178D734C /* OwenisasWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = OwenisasWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		4F9684EB2AD3324AF4C422AF /* OwenisasWatchWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = OwenisasWatchWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		4AF7675CF1DB1CFE32BA07CB /* WatchWidgetSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchShared/WatchWidgetSnapshot.swift; sourceTree = SOURCE_ROOT; };
+		CC24B46F4D6C9771E48A0D41 /* WatchWidgetStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchShared/WatchWidgetStore.swift; sourceTree = SOURCE_ROOT; };
+		082FFFF8C5CDFF92BB7D835A /* WatchWidgetPlaybackIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchShared/WatchWidgetPlaybackIntent.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -131,6 +141,7 @@
 			path = OwenisasWidget;
 			sourceTree = "<group>";
 		};
+		6E096708D23BA5943F36B795 /* OwenisasWatchWidget */ = {isa = PBXFileSystemSynchronizedRootGroup; path = OwenisasWatchWidget; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -179,6 +190,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		649014BCD3AB3B3F6D741EE5 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -217,6 +229,10 @@
 				1C5AECB4501F7F1F29D6EA71 /* OwenisasShare */,
 				EB6B58EAA02D54A3674FBD59 /* OwenisasWidget */,
 				5CF7F42B7BEB30228C3C7773 /* OwenisasWatch */,
+				6E096708D23BA5943F36B795 /* OwenisasWatchWidget */,
+				4AF7675CF1DB1CFE32BA07CB /* WatchWidgetSnapshot.swift */,
+				CC24B46F4D6C9771E48A0D41 /* WatchWidgetStore.swift */,
+				082FFFF8C5CDFF92BB7D835A /* WatchWidgetPlaybackIntent.swift */,
 				316228C9BD8D5A711205FF80 /* WatchShared */,
 				6EA446EA2DAF4ECF00E36322 /* Products */,
 				52D9C00F40DFFDD743FF54DB /* Frameworks */,
@@ -232,6 +248,7 @@
 				0EF4AAC0680ECDD4001D8F32 /* OwenisasShare.appex */,
 				C62478F0B92F33A5178D734C /* OwenisasWidget.appex */,
 				43D79F9689E973EEA13751F4 /* Owenisas Music.app */,
+				4F9684EB2AD3324AF4C422AF /* OwenisasWatchWidget.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -336,10 +353,12 @@
 				3F915107CD9E1DF58A3382B4 /* Sources */,
 				F52F33DB938BB2D9D66049A2 /* Frameworks */,
 				1D96584CF26D97AF01A61526 /* Resources */,
+				DED513D31B183B8837290763 /* Embed Watch Widgets */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				C6C23DE8649C4232B8252F51 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				316228C9BD8D5A711205FF80 /* WatchShared */,
@@ -369,6 +388,18 @@
 			name = OwenisasWidget;
 			productName = OwenisasWidget;
 			productReference = C62478F0B92F33A5178D734C /* OwenisasWidget.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		19183C78E367116D2841BB48 /* OwenisasWatchWidget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B38430E437ECFF61A160F8CB /* Build configuration list for PBXNativeTarget "OwenisasWatchWidget" */;
+			buildPhases = (4FD690CE52B955BDFC80AC07 /* Sources */, 649014BCD3AB3B3F6D741EE5 /* Frameworks */, 06657CB577FA29E034C685B5 /* Resources */, );
+			buildRules = ();
+			dependencies = ();
+			fileSystemSynchronizedGroups = (6E096708D23BA5943F36B795 /* OwenisasWatchWidget */, );
+			name = OwenisasWatchWidget;
+			productName = OwenisasWatchWidget;
+			productReference = 4F9684EB2AD3324AF4C422AF /* OwenisasWatchWidget.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
@@ -414,6 +445,7 @@
 				499CD89BAC327B800EA5BBAD /* OwenisasShare */,
 				D716CBD7A375005683C009E6 /* OwenisasWidget */,
 				A3BD32E077220470936F0A39 /* OwenisasWatch */,
+				19183C78E367116D2841BB48 /* OwenisasWatchWidget */,
 			);
 		};
 /* End PBXProject section */
@@ -461,6 +493,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		06657CB577FA29E034C685B5 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -506,6 +539,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		4FD690CE52B955BDFC80AC07 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (6208728711049D0F87C938C6 /* WatchWidgetSnapshot.swift in Sources */, CD372D4441583223C0DA0FC6 /* WatchWidgetStore.swift in Sources */, EEDA80659DF978D4F7656927 /* WatchWidgetPlaybackIntent.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -537,6 +571,7 @@
 			target = D716CBD7A375005683C009E6 /* OwenisasWidget */;
 			targetProxy = 3018B4C57F400CF7789BA782 /* PBXContainerItemProxy */;
 		};
+		C6C23DE8649C4232B8252F51 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = 19183C78E367116D2841BB48 /* OwenisasWatchWidget */; targetProxy = C47CB5E0B1C60F5EB87D6549 /* PBXContainerItemProxy */; };
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
@@ -547,11 +582,12 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 202609231913;
+				CURRENT_PROJECT_VERSION = 202609292030;
 				DEVELOPMENT_TEAM = 3LHSL95J9H;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Config/OwenisasWatch-Info.plist";
+				CODE_SIGN_ENTITLEMENTS = Config/OwenisasWatch.entitlements;
 				INFOPLIST_KEY_CFBundleDisplayName = "Owenisas Music";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "com.Owenisas-Music";
@@ -582,7 +618,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = Config/OwenisasWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 202609231913;
+				CURRENT_PROJECT_VERSION = 202609292030;
 				DEVELOPMENT_TEAM = 3LHSL95J9H;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -614,11 +650,12 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 202609231913;
+				CURRENT_PROJECT_VERSION = 202609292030;
 				DEVELOPMENT_TEAM = 3LHSL95J9H;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Config/OwenisasWatch-Info.plist";
+				CODE_SIGN_ENTITLEMENTS = Config/OwenisasWatch.entitlements;
 				INFOPLIST_KEY_CFBundleDisplayName = "Owenisas Music";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "com.Owenisas-Music";
@@ -769,7 +806,7 @@
 				CODE_SIGN_ENTITLEMENTS = Config/OwenisasMusic.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 202609231913;
+				CURRENT_PROJECT_VERSION = 202609292030;
 				DEVELOPMENT_TEAM = 3LHSL95J9H;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -803,7 +840,7 @@
 				CODE_SIGN_ENTITLEMENTS = Config/OwenisasMusic.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 202609231913;
+				CURRENT_PROJECT_VERSION = 202609292030;
 				DEVELOPMENT_TEAM = 3LHSL95J9H;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -834,7 +871,7 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 202609231913;
+				CURRENT_PROJECT_VERSION = 202609292030;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
 				MARKETING_VERSION = 1.1;
@@ -852,7 +889,7 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 202609231913;
+				CURRENT_PROJECT_VERSION = 202609292030;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
 				MARKETING_VERSION = 1.1;
@@ -869,7 +906,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 202609231913;
+				CURRENT_PROJECT_VERSION = 202609292030;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.Owenisas-MusicUITests";
@@ -885,7 +922,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 202609231913;
+				CURRENT_PROJECT_VERSION = 202609292030;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.Owenisas-MusicUITests";
@@ -904,7 +941,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = Config/OwenisasShare.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 202609231913;
+				CURRENT_PROJECT_VERSION = 202609292030;
 				DEVELOPMENT_TEAM = 3LHSL95J9H;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -936,7 +973,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = Config/OwenisasShare.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 202609231913;
+				CURRENT_PROJECT_VERSION = 202609292030;
 				DEVELOPMENT_TEAM = 3LHSL95J9H;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -968,7 +1005,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = Config/OwenisasWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 202609231913;
+				CURRENT_PROJECT_VERSION = 202609292030;
 				DEVELOPMENT_TEAM = 3LHSL95J9H;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -991,6 +1028,56 @@
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
+		};
+		DEF0EF9E23807E952D290BF6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Config/OwenisasWatchWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 202609292030;
+				DEVELOPMENT_TEAM = 3LHSL95J9H;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Config/OwenisasWatchWidget-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Owenisas Music";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks", );
+				MARKETING_VERSION = 1.1;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.Owenisas-Music.watchkitapp.Widget";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "WATCH_WIDGET_EXTENSION $(inherited)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Debug;
+		};
+		2B2EDC189FF96423ABD79C65 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Config/OwenisasWatchWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 202609292030;
+				DEVELOPMENT_TEAM = 3LHSL95J9H;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Config/OwenisasWatchWidget-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Owenisas Music";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks", );
+				MARKETING_VERSION = 1.1;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.Owenisas-Music.watchkitapp.Widget";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "WATCH_WIDGET_EXTENSION $(inherited)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Release;
 		};
 /* End XCBuildConfiguration section */
 
@@ -1058,6 +1145,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		B38430E437ECFF61A160F8CB /* Build configuration list for PBXNativeTarget "OwenisasWatchWidget" */ = {isa = XCConfigurationList; buildConfigurations = (DEF0EF9E23807E952D290BF6 /* Debug */, 2B2EDC189FF96423ABD79C65 /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
 	};
 	rootObject = 6EA446E12DAF4ECF00E36322 /* Project object */;

@@ -142,6 +142,79 @@ struct LibraryBackupTests {
         #expect(playlists.first?.songs.count == 1)
     }
 
+    @Test("Backup preserves playlist identity, cover and user order across a fresh store")
+    func preservesPlaylistIdentityAndOrder() throws {
+        let dm = DataManager()
+        let ctx = try makeContext()
+        dm.configure(with: ctx)
+        let a = makeSongData(id: "ordered-a")
+        let b = makeSongData(id: "ordered-b")
+        ctx.insert(a); ctx.insert(b)
+        let playlist = PlaylistData(id: "stable-playlist", title: "Ordered", coverImagePath: "Covers/custom.jpg")
+        ctx.insert(playlist)
+        playlist.songs = [a, b]
+        playlist.songOrder = [b.id, a.id]
+        try ctx.save()
+        let data = try #require(dm.exportBackupData())
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let backup = try decoder.decode(LibraryBackup.self, from: data)
+        #expect(backup.playlists.first?.songIDs == [b.id, a.id])
+        #expect(backup.playlists.first?.id == playlist.id)
+        #expect(backup.playlists.first?.coverImagePath == playlist.coverImagePath)
+
+        let restoredDM = DataManager()
+        let restoredContext = try makeContext()
+        restoredDM.configure(with: restoredContext)
+        restoredContext.insert(makeSongData(id: a.id))
+        restoredContext.insert(makeSongData(id: b.id))
+        try restoredContext.save()
+        _ = try #require(restoredDM.importBackupData(data))
+        let restored = try #require(restoredDM.fetchAllPlaylists().first)
+        #expect(restored.id == "stable-playlist")
+        #expect(restored.coverImagePath == "Covers/custom.jpg")
+        #expect(restored.songOrder == [b.id, a.id])
+        #expect(restored.orderedSongs.map(\.id) == [b.id, a.id])
+        restored.title = "Renamed locally"
+        _ = try #require(restoredDM.importBackupData(data))
+        #expect(restoredDM.fetchAllPlaylists().count == 1)
+    }
+
+    @Test("Legacy JSON restores ordered IDs into a same-title playlist without deleting local songs")
+    func legacyPlaylistOrder() throws {
+        let dm = DataManager()
+        let ctx = try makeContext()
+        dm.configure(with: ctx)
+        let songs = ["a", "b", "local"].map { makeSongData(id: $0) }
+        songs.forEach { ctx.insert($0) }
+        let playlist = PlaylistData(title: "Legacy", coverImagePath: "local.jpg")
+        ctx.insert(playlist)
+        playlist.songs = songs
+        playlist.songOrder = ["local", "a", "b"]
+        try ctx.save()
+        let json = #"{"version":1,"exportDate":"2023-11-14T22:13:20Z","songs":[],"playlists":[{"title":"Legacy","dateCreated":"2023-11-14T22:13:20Z","songIDs":["b","missing","a","b"]}]}"#
+        let result = try #require(dm.importBackupData(Data(json.utf8)))
+        #expect(result.newPlaylists == 0)
+        #expect(playlist.songOrder == ["b", "a", "local"])
+        #expect(playlist.orderedSongs.map(\.id) == ["b", "a", "local"])
+        #expect(playlist.coverImagePath == "local.jpg")
+    }
+
+    @Test("Backups keep distinct same-title playlist identities")
+    func distinctSameTitlePlaylists() throws {
+        let dm = DataManager()
+        let ctx = try makeContext()
+        dm.configure(with: ctx)
+        ctx.insert(PlaylistData(id: "first", title: "Same"))
+        ctx.insert(PlaylistData(id: "second", title: "Same"))
+        try ctx.save()
+        let data = try #require(dm.exportBackupData())
+        let restored = DataManager()
+        restored.configure(with: try makeContext())
+        _ = try #require(restored.importBackupData(data))
+        #expect(Set(restored.fetchAllPlaylists().map(\.id)) == ["first", "second"])
+    }
+
     @Test("Corrupt backup data is rejected cleanly")
     func importRejectsCorruptData() throws {
         let dm = DataManager()

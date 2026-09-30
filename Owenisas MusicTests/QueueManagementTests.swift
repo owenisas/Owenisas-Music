@@ -9,6 +9,98 @@ import Testing
 
 struct QueueManagementTests {
 
+    @Test("Removing the playing duplicate advances to the following slot, not the earlier copy")
+    func removesPlayingDuplicate() {
+        let player = MusicPlayerManager()
+        let songs = [makeSong(id: "a"), makeSong(id: "b"), makeSong(id: "a"), makeSong(id: "c")]
+        player.queue = songs
+        player.currentSong = songs[2]
+        player.currentIndex = 2
+        player.removeFromQueue(at: IndexSet(integer: 2))
+        #expect(player.currentSong?.id == "c")
+        #expect(player.currentIndex == 2)
+    }
+
+    @Test("Removing another duplicate preserves the playing occurrence")
+    func removesEarlierDuplicate() {
+        let player = MusicPlayerManager()
+        let songs = [makeSong(id: "a"), makeSong(id: "b"), makeSong(id: "a"), makeSong(id: "c")]
+        player.queue = songs
+        player.currentSong = songs[2]
+        player.currentIndex = 2
+        player.removeFromQueue(at: IndexSet(integer: 3))
+        #expect(player.currentIndex == 2)
+        player.removeFromQueue(at: IndexSet(integer: 0))
+        #expect(player.currentIndex == 1)
+    }
+
+    @Test("Duplicate removal and shuffle preserve remaining multiplicity")
+    func duplicateRemovalSurvivesShuffle() {
+        let player = MusicPlayerManager()
+        let songs = [makeSong(id: "a"), makeSong(id: "b"), makeSong(id: "a"), makeSong(id: "c")]
+        player.restoreSession(PlaybackSession(queueIDs: songs.map(\.id), originalQueueIDs: songs.map(\.id), currentSongID: "a", position: 0, isShuffled: false, repeatModeRaw: 0), songs: songs)
+        player.removeFromQueue(at: IndexSet(integer: 2))
+        player.toggleShuffle()
+        #expect(player.queue.filter { $0.id == "a" }.count == 1)
+        player.toggleShuffle()
+        #expect(player.queue.map(\.id) == ["a", "b", "c"])
+    }
+
+    @Test("Moving a duplicate follows the exact current occurrence")
+    func movesPlayingDuplicate() {
+        let player = MusicPlayerManager()
+        let songs = [makeSong(id: "a"), makeSong(id: "b"), makeSong(id: "a"), makeSong(id: "c")]
+        player.queue = songs
+        player.currentSong = songs[2]
+        player.currentIndex = 2
+        player.moveInQueue(from: IndexSet(integer: 2), to: 4)
+        #expect(player.currentIndex == 3)
+    }
+
+    @Test("Toggling a favorite updates every duplicate queue entry")
+    func favoritesUpdateAllDuplicates() {
+        let player = MusicPlayerManager()
+        let a = makeSong(id: "a")
+        player.queue = [a, a]
+        player.currentSong = a
+        player.toggleFavorite(for: "a")
+        #expect(player.queue.allSatisfy { $0.isFavorited })
+    }
+
+    @Test("A failed load immediately stops claiming playback")
+    func failedLoadClearsPlayingState() {
+        let player = MusicPlayerManager()
+        player.isPlaying = true
+        player.play(song: makeSong(id: "missing"), in: [makeSong(id: "missing"), makeSong(id: "other")])
+        #expect(!player.isPlaying)
+        player.stop()
+    }
+
+    @Test("Library deletion of another song preserves the current duplicate occurrence")
+    func libraryDeletionPreservesDuplicateCursor() {
+        let player = MusicPlayerManager()
+        let songs = [makeSong(id: "a"), makeSong(id: "b"), makeSong(id: "a"), makeSong(id: "c")]
+        player.queue = songs
+        player.currentSong = songs[2]
+        player.currentIndex = 2
+        player.stopAndRemoveFromQueue(songId: "b")
+        #expect(player.currentIndex == 1)
+        #expect(player.currentSong?.id == "a")
+    }
+
+    @Test("Batch removal accounts for every removed slot before the current one")
+    func removesBatchAroundCurrent() {
+        let player = MusicPlayerManager()
+        let songs = [makeSong(id: "a"), makeSong(id: "b"), makeSong(id: "a"), makeSong(id: "c"), makeSong(id: "d")]
+        player.queue = songs
+        player.currentSong = songs[2]
+        player.currentIndex = 2
+        player.removeFromQueue(at: IndexSet([0, 2, 4]))
+        #expect(player.queue.map(\.id) == ["b", "c"])
+        #expect(player.currentSong?.id == "c")
+        #expect(player.currentIndex == 1)
+    }
+
     // MARK: - Helpers
 
     private func makeSong(id: String) -> Song {

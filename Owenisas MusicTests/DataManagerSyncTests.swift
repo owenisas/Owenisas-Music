@@ -264,6 +264,98 @@ struct DataManagerSyncTests {
         #expect(dm.fetchAllSongs().contains { $0.id == id })
     }
 
+    @Test("Same-name recordings get separate identities and failed copies preserve the original")
+    func importCollisionPreservesOriginal() throws {
+        let fm = FileManager.default
+        let id = "__test_collision_\(UUID().uuidString)"
+        let temp = fm.temporaryDirectory.appendingPathComponent(id)
+        try fm.createDirectory(at: temp, withIntermediateDirectories: true)
+        defer {
+            try? fm.removeItem(at: temp)
+            for folder in (try? fm.contentsOfDirectory(at: songsFolder, includingPropertiesForKeys: nil)) ?? []
+                where folder.lastPathComponent.hasPrefix(id) { try? fm.removeItem(at: folder) }
+        }
+        let source = temp.appendingPathComponent("\(id).mp3")
+        let original = Data("ID3".utf8) + Data(repeating: 0xAB, count: 40_000)
+        let incoming = Data("ID3".utf8) + Data(repeating: 0xCD, count: 40_000)
+        try original.write(to: source)
+        let dm = DataManager()
+        dm.configure(with: try makeContext())
+        #expect(dm.importAudioFiles(from: [source]).imported == 1)
+        let originalURL = songsFolder.appendingPathComponent(id).appendingPathComponent(source.lastPathComponent)
+        try fm.removeItem(at: source)
+        #expect(dm.importAudioFiles(from: [source]).skipped == 1)
+        #expect(try Data(contentsOf: originalURL) == original)
+        try incoming.write(to: source)
+        #expect(dm.importAudioFiles(from: [source]).imported == 1)
+        #expect(try Data(contentsOf: originalURL) == original)
+        let songs = dm.fetchAllSongs().filter { $0.id.hasPrefix(id) }
+        #expect(songs.count == 2)
+        let second = try #require(songs.first { $0.id != id })
+        #expect(try Data(contentsOf: second.audioFileURL) == incoming)
+        // A different extension with the same basename must also be independent.
+        let wav = temp.appendingPathComponent("\(id).wav")
+        try (Data("RIFF".utf8) + Data(repeating: 0, count: 40_000)).write(to: wav)
+        #expect(dm.importAudioFiles(from: [wav]).imported == 1)
+        #expect(dm.fetchAllSongs().filter { $0.id.hasPrefix(id) }.count == 3)
+    }
+
+    @Test("Explicit self-reimport survives rescans and store loss while preserving sidecar provenance")
+    func reimportTimestampSurvivesRescan() throws {
+        let fm = FileManager.default
+        let id = "__test_readd_\(UUID().uuidString)"
+        defer { removeSongFolder(name: id) }
+        let folder = try createSongFolder(name: id)
+        // Deliberately unrelated basename: own-file detection uses the folder identity.
+        let audio = folder.appendingPathComponent("\(id).mp3")
+        let renamed = folder.appendingPathComponent("recording.mp3")
+        try fm.moveItem(at: audio, to: renamed)
+        let oldDate = Date(timeIntervalSince1970: 1_600_000_000)
+        try fm.setAttributes([.modificationDate: oldDate], ofItemAtPath: renamed.path)
+        let json = #"{"title":"Original","artist":"Artist","videoId":"video-id","source":"youtube","duration":"42","customProvenance":{"owner":"user"}}"#
+        try Data(json.utf8).write(to: folder.appendingPathComponent("meta.json"))
+        let dm = DataManager()
+        dm.configure(with: try makeContext())
+        dm.syncSingleSong(folderName: id)
+        let tombstone = Date.now.addingTimeInterval(-10)
+        #expect(dm.importAudioFiles(from: [renamed]).imported == 1)
+        let song = try #require(dm.fetchAllSongs().first { $0.id == id })
+        #expect(song.dateAdded > tombstone)
+        let importedAt = song.dateAdded
+        dm.syncSingleSong(folderName: id)
+        #expect(song.dateAdded == importedAt)
+        let recovered = DataManager()
+        recovered.configure(with: try makeContext())
+        recovered.syncSingleSong(folderName: id)
+        #expect(recovered.fetchAllSongs().first { $0.id == id }?.dateAdded == importedAt)
+        let data = try Data(contentsOf: folder.appendingPathComponent("meta.json"))
+        let preserved = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(preserved["source"] as? String == "youtube")
+        #expect(preserved["videoId"] as? String == "video-id")
+        #expect(preserved["duration"] as? String == "42")
+        #expect((preserved["customProvenance"] as? [String: String])?["owner"] == "user")
+        #expect(dm.fetchAllSongs().count == 1)
+    }
+
+    @Test("External imports use import time rather than copied historic modification time")
+    func externalImportUsesCurrentDate() throws {
+        let fm = FileManager.default
+        let id = "__test_oldimport_\(UUID().uuidString)"
+        let source = fm.temporaryDirectory.appendingPathComponent("\(id).mp3")
+        defer { removeSongFolder(name: id); try? fm.removeItem(at: source) }
+        try (Data("ID3".utf8) + Data(repeating: 0xAB, count: 40_000)).write(to: source)
+        try fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_600_000_000)], ofItemAtPath: source.path)
+        let dm = DataManager()
+        dm.configure(with: try makeContext())
+        let before = Date.now
+        #expect(dm.importAudioFiles(from: [source]).imported == 1)
+        let song = try #require(dm.fetchAllSongs().first { $0.id == id })
+        #expect(song.dateAdded >= before)
+        let added = song.dateAdded
+        dm.syncSingleSong(folderName: id)
+        #expect(song.dateAdded == added)
+    }
+
     @Test("Unsupported file types are skipped, not copied")
     func importSkipsUnsupportedTypes() throws {
         let fm = FileManager.default

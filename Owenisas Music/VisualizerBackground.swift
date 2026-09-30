@@ -45,7 +45,23 @@ final class ImageCache {
         // Don't retry paths that already failed
         if hasFailed(path) { return nil }
 
-        // Try standard loading first, then Data-based (handles WebP/unknown formats)
+        // Decode only the resolution needed for large player artwork. ImageIO
+        // downsamples during decode rather than allocating the source raster first.
+        let url = URL(fileURLWithPath: path) as CFURL
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: 2048
+        ]
+        if let source = CGImageSourceCreateWithURL(url, [kCGImageSourceShouldCache: false] as CFDictionary),
+           let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+            let decoded = UIImage(cgImage: cg)
+            cache.setObject(decoded, forKey: key, cost: Self.cost(of: decoded))
+            return decoded
+        }
+
+        // Preserve compatibility with formats that ImageIO cannot decode.
         var image = UIImage(contentsOfFile: path)
         if image == nil, let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
             image = UIImage(data: data)

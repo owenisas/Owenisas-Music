@@ -12,6 +12,9 @@ import AppIntents
 
 /// What a playback intent asks the app to do.
 enum PlaybackCommand: String {
+    case play
+    case pause
+    case likeCurrent
     case togglePlayPause
     case next
     case previous

@@ -414,7 +414,7 @@ class DataManager: ObservableObject {
             if existing.audioFilePath != audioRelPath { existing.audioFilePath = audioRelPath }
             if existing.coverImagePath != coverRelPath { existing.coverImagePath = coverRelPath }
             if existing.subtitleFilePath != subtitleRelPath { existing.subtitleFilePath = subtitleRelPath }
-            if abs(existing.dateAdded.timeIntervalSince(inferredDateAdded)) > 1 {
+            if existing.dateAdded != inferredDateAdded {
                 existing.dateAdded = inferredDateAdded
             }
             // Repair rows that were indexed from the folder name alone (for
@@ -470,6 +470,9 @@ class DataManager: ObservableObject {
     }
 
     private func inferredSongDateAdded(audioFile: URL, songFolder: URL, fileManager: FileManager) -> Date {
+        if let explicitDate = SongFolderMetadata.read(from: songFolder)?.dateAdded {
+            return explicitDate
+        }
         let audioAttrs = (try? fileManager.attributesOfItem(atPath: audioFile.path)) ?? [:]
         let folderAttrs = (try? fileManager.attributesOfItem(atPath: songFolder.path)) ?? [:]
 
@@ -682,24 +685,41 @@ class DataManager: ObservableObject {
                 continue
             }
 
-            let songFolder = docs.appendingPathComponent("Songs").appendingPathComponent(folderName)
-            let destination = songFolder.appendingPathComponent(url.lastPathComponent)
-            // Picking a file already inside our own Songs folder must not
-            // delete-then-copy onto itself — just (re)index it in place.
-            let sourcePath = url.resolvingSymlinksInPath().standardizedFileURL.path
-            let destinationPath = destination.resolvingSymlinksInPath().standardizedFileURL.path
-            if sourcePath == destinationPath {
-                syncSingleSong(folderName: folderName)
-                imported += 1
-                continue
-            }
+            let songsRoot = docs.appendingPathComponent("Songs")
+            let resolvedSource = url.resolvingSymlinksInPath().standardizedFileURL
+            let sourceFolder = resolvedSource.deletingLastPathComponent()
+            let isOwnFile = sourceFolder.deletingLastPathComponent()
+                == songsRoot.resolvingSymlinksInPath().standardizedFileURL
+            // Stage a complete folder out of the scanner's view. Moving it into
+            // place never overwrites an existing recording, even after copy failure.
+            let stagingFolder = songsRoot.appendingPathComponent(".import-\(UUID().uuidString)")
+            defer { try? fm.removeItem(at: stagingFolder) }
             do {
-                try fm.createDirectory(at: songFolder, withIntermediateDirectories: true)
-                if fm.fileExists(atPath: destination.path) {
-                    try fm.removeItem(at: destination)
+                if isOwnFile {
+                    guard PlayableLocalAudio.isPlayable(at: resolvedSource) else {
+                        skipped += 1
+                        continue
+                    }
+                    try SongFolderMetadata.recordImportDate(.now, in: sourceFolder,
+                                                            fallbackFolderName: sourceFolder.lastPathComponent)
+                    syncSingleSong(folderName: sourceFolder.lastPathComponent)
+                } else {
+                    try fm.createDirectory(at: stagingFolder, withIntermediateDirectories: true)
+                    let stagedAudio = stagingFolder.appendingPathComponent(url.lastPathComponent)
+                    try fm.copyItem(at: url, to: stagedAudio)
+                    guard PlayableLocalAudio.isPlayable(at: stagedAudio) else {
+                        skipped += 1
+                        continue
+                    }
+                    try SongFolderMetadata.recordImportDate(.now, in: stagingFolder,
+                                                            fallbackFolderName: folderName)
+                    var identity = folderName
+                    while fm.fileExists(atPath: songsRoot.appendingPathComponent(identity).path) {
+                        identity = "\(folderName) (\(UUID().uuidString))"
+                    }
+                    try fm.moveItem(at: stagingFolder, to: songsRoot.appendingPathComponent(identity))
+                    syncSingleSong(folderName: identity)
                 }
-                try fm.copyItem(at: url, to: destination)
-                syncSingleSong(folderName: folderName)
                 imported += 1
             } catch {
                 print("[DEBUG] DataManager: Import failed for \(url.lastPathComponent): \(error.localizedDescription)")
@@ -735,7 +755,9 @@ class DataManager: ObservableObject {
                 LibraryBackup.PlaylistBackup(
                     title: $0.title,
                     dateCreated: $0.dateCreated,
-                    songIDs: $0.songs.map(\.id)
+                    songIDs: $0.orderedSongs.map(\.id),
+                    id: $0.id,
+                    coverImagePath: $0.coverImagePath
                 )
             }
         )
@@ -747,7 +769,8 @@ class DataManager: ObservableObject {
     }
 
     /// Merges a backup into the current library. Never deletes anything:
-    /// likes/play counts take the richer value, playlists are matched by title.
+    /// likes/play counts take the richer value. Modern playlists match by id;
+    /// old backups without identities fall back to title.
     @discardableResult
     func importBackupData(_ data: Data) -> LibraryBackupImportResult? {
         guard let ctx = modelContext else { return nil }
@@ -776,20 +799,32 @@ class DataManager: ObservableObject {
         }
 
         var newPlaylists = 0
-        let existingPlaylists = (try? ctx.fetch(FetchDescriptor<PlaylistData>())) ?? []
+        var existingPlaylists = (try? ctx.fetch(FetchDescriptor<PlaylistData>())) ?? []
         for entry in backup.playlists {
             let target: PlaylistData
-            if let existing = existingPlaylists.first(where: { $0.title == entry.title }) {
+            if let existing = existingPlaylists.first(where: {
+                if let id = entry.id { return $0.id == id }
+                return $0.title == entry.title
+            }) {
                 target = existing
             } else {
-                target = PlaylistData(title: entry.title, dateCreated: entry.dateCreated)
+                target = PlaylistData(id: entry.id ?? UUID().uuidString, title: entry.title,
+                                      coverImagePath: entry.coverImagePath, dateCreated: entry.dateCreated)
                 ctx.insert(target)
+                existingPlaylists.append(target)
                 newPlaylists += 1
             }
+            if let cover = entry.coverImagePath { target.coverImagePath = cover }
+            let localOrder = target.orderedSongs.map(\.id)
             for songID in entry.songIDs {
                 if let song = songsByID[songID], !target.songs.contains(where: { $0.id == song.id }) {
                     target.songs.append(song)
                 }
+            }
+            let availableIDs = Set(target.songs.map(\.id))
+            var seen = Set<String>()
+            target.songOrder = (entry.songIDs + localOrder).filter {
+                availableIDs.contains($0) && seen.insert($0).inserted
             }
         }
 
@@ -833,15 +868,19 @@ struct SongFolderMetadata: Codable, Equatable {
     var videoId: String?
     var duration: Double?
     var source: String?
+    /// Explicit local import time; absent in legacy/downloader sidecars.
+    var dateAdded: Date?
 
     init(title: String, artist: String? = nil, album: String? = nil,
-         videoId: String? = nil, duration: Double? = nil, source: String? = nil) {
+         videoId: String? = nil, duration: Double? = nil, source: String? = nil,
+         dateAdded: Date? = nil) {
         self.title = title
         self.artist = artist
         self.album = album
         self.videoId = videoId
         self.duration = duration
         self.source = source
+        self.dateAdded = dateAdded
     }
 
     init(from decoder: Decoder) throws {
@@ -858,6 +897,7 @@ struct SongFolderMetadata: Codable, Equatable {
             duration = nil
         }
         source = try? c.decodeIfPresent(String.self, forKey: .source)
+        dateAdded = try? c.decodeIfPresent(Date.self, forKey: .dateAdded)
     }
 
     /// Parses meta.json content. Nil for malformed JSON or an empty title.
@@ -888,6 +928,31 @@ struct SongFolderMetadata: Codable, Equatable {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(self)
         try data.write(to: folder.appendingPathComponent(Self.fileName), options: .atomic)
+    }
+
+    /// Update only the timestamp in existing JSON. Preserve unknown provenance
+    /// keys and loose legacy values rather than round-tripping the typed subset.
+    static func recordImportDate(_ date: Date, in folder: URL, fallbackFolderName: String) throws {
+        let url = folder.appendingPathComponent(fileName)
+        var json: [String: Any]
+        if FileManager.default.fileExists(atPath: url.path) {
+            let data = try Data(contentsOf: url)
+            guard let existing = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  parse(data) != nil else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            json = existing
+        } else {
+            let parts = fallbackFolderName.components(separatedBy: " - ")
+            json = ["title": fallbackFolderName]
+            if parts.count >= 2 {
+                json["artist"] = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                json["title"] = parts.dropFirst().joined(separator: " - ").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        json["dateAdded"] = date.timeIntervalSinceReferenceDate
+        try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+            .write(to: url, options: .atomic)
     }
 
     static func apply(_ meta: SongFolderMetadata, to song: SongData) {

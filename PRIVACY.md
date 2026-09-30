@@ -1,12 +1,12 @@
 # Owenisas Music Privacy Policy
 
-**Last updated: 2026-09-22**
+**Last updated: 2026-09-29**
 
 Owenisas Music is a local music-library player for iPhone and iPad.
 
 ## Data collection
 
-Owenisas Music does not collect, transmit, sell, or share personal data. The App Store version does not contain advertising, analytics, tracking SDKs, user accounts, or a remote media-download service.
+The developer does not collect, receive, sell, or share your personal data. The app can transfer your library to your own Apple iCloud Drive and paired Apple Watch as described below. The App Store version does not contain advertising, analytics, tracking SDKs, user accounts, or a remote media-download service.
 
 ## Data stored on your device
 
@@ -17,11 +17,11 @@ The app stores the following information locally on your device:
 - playlists, likes, play counts, listening history, playback position, and app settings;
 - optional library backup files that you explicitly export.
 
-This information remains on your device or in a file location you choose through Apple's system file picker. Owenisas Music does not upload this information to the developer.
+This information is stored on your device, in your own iCloud Drive when sync is enabled, or in a file location you choose through Apple's system file picker. Owenisas Music does not upload this information to the developer.
 
-## iCloud sync (optional)
+## iCloud sync (can be turned off)
 
-When **Settings ▸ iCloud ▸ Sync with iCloud** is on and you are signed in to iCloud, the app copies your songs (audio, artwork, lyrics) and library data (likes, playlists, play counts, playback positions) to the app's folder in **your own iCloud Drive**, so your other devices signed in to the same Apple ID can use them. This data is stored by Apple under your Apple ID; the developer has no access to it. You can see it in Files ▸ iCloud Drive ▸ Owenisas Music, turn sync off at any time, and delete it from iCloud Drive.
+On first launch, sync is enabled by default if you are signed in to iCloud. You can turn it off in **Settings ▸ iCloud ▸ Sync with iCloud**. When sync is on and you are signed in to iCloud, the app copies your songs (audio, artwork, lyrics) and library data (likes, playlists, play counts, playback positions) to the app's folder in **your own iCloud Drive**, so your other devices signed in to the same Apple ID can use them. This data is stored by Apple under your Apple ID; the developer has no access to it. You can see it in Files ▸ iCloud Drive ▸ Owenisas Music, turn sync off at any time, and delete it from iCloud Drive.
 
 ## Widgets and Apple Watch
 
@@ -33,7 +33,7 @@ Owenisas Music uses Apple's file picker when you choose to import audio or resto
 
 ## Your choices
 
-You can delete imported songs from within the app. You can also remove the app and its local data using iOS or iPadOS settings. Library backups are files you control and can delete through the Files app.
+You can delete imported songs from within the app. With iCloud sync enabled, song and playlist deletions can propagate to your other synced devices; sync is not a separate archival backup. You can also remove the app and its local data using iOS or iPadOS settings. Library backups are files you control and can delete through the Files app.
 
 ## Children's privacy
 

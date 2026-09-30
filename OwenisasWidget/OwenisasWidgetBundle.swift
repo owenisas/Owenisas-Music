@@ -6,5 +6,9 @@ struct OwenisasWidgetBundle: WidgetBundle {
     var body: some Widget {
         NowPlayingWidget()
         PlayPauseControl()
+        PlaylistWidget()
+        NextTrackControl()
+        FavoriteTrackControl()
+        SleepTimerLiveActivity()
     }
 }

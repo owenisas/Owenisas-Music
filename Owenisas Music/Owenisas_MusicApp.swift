@@ -16,7 +16,38 @@ enum AppTab: Hashable {
 final class AppRouter: ObservableObject {
     static let shared = AppRouter()
 
+    @Published var showSleepTimer = false
     @Published var selectedTab: AppTab = ProcessInfo.processInfo.arguments.contains("APP_STORE_SCREENSHOT_LIBRARY") ? .library : .home
+}
+
+/// No temporary editable store: every launch/retry must open the real library.
+@MainActor
+final class PersistentLibraryStore: ObservableObject {
+    @Published private(set) var container: ModelContainer?
+    @Published private(set) var failureMessage: String?
+
+    init() { retry() }
+
+    func retry() {
+        let schema = Schema([SongData.self, AlbumData.self, PlaylistData.self])
+        // Preserve the original local store, without App Group relocation or
+        // CloudKit schema restrictions. iCloud uses the separate file mirror.
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false,
+                                        groupContainer: .none, cloudKitDatabase: .none)
+        do {
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("UI_TEST_FAIL_PERSISTENT_STORE") {
+                throw NSError(domain: "LibraryStore", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "Persistent storage failure (test)"])
+            }
+            #endif
+            container = try ModelContainer(for: schema, configurations: [config])
+            failureMessage = nil
+        } catch {
+            container = nil
+            failureMessage = error.localizedDescription
+        }
+    }
 }
 
 @main
@@ -25,36 +56,12 @@ struct Owenisas_MusicApp: App {
     private let dataManager = DataManager.shared
     @ObservedObject private var router = AppRouter.shared
 
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            SongData.self,
-            AlbumData.self,
-            PlaylistData.self,
-        ])
-        // groupContainer / cloudKitDatabase: .none — the app now has App Group
-        // and iCloud entitlements (widget/share extension, iCloud Drive song
-        // mirror). With the defaults, SwiftData would move the store into the
-        // App Group (existing installs open an empty library) and switch to
-        // CloudKit mode (rejects our unique constraints → crash at launch).
-        // The store stays where it always was; library data syncs through
-        // LibraryCloudSync instead.
-        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false, groupContainer: .none, cloudKitDatabase: .none)
-        do {
-            return try ModelContainer(for: schema, configurations: [config])
-        } catch {
-            // Preserve app launch and expose a usable session if persistent storage is
-            // unavailable (for example after a partial migration or disk error).
-            print("[DataStore] Persistent container unavailable: \(error). Falling back to memory.")
-            let fallback = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, groupContainer: .none, cloudKitDatabase: .none)
-            do {
-                return try ModelContainer(for: schema, configurations: [fallback])
-            } catch {
-                fatalError("Could not create fallback ModelContainer: \(error)")
-            }
-        }
-    }()
+    @StateObject private var libraryStore: PersistentLibraryStore
 
     init() {
+        let store = PersistentLibraryStore()
+        _libraryStore = StateObject(wrappedValue: store)
+        guard let sharedModelContainer = store.container else { return }
         // A watch request can wake the app in the background without a
         // window, so onAppear never runs: wire the data layer and the watch
         // link here too (both are idempotent).
@@ -70,6 +77,7 @@ struct Owenisas_MusicApp: App {
 
     var body: some Scene {
         WindowGroup {
+            if let sharedModelContainer = libraryStore.container {
             TabView(selection: $router.selectedTab) {
                 NavigationStack {
                     ContentView()
@@ -116,9 +124,13 @@ struct Owenisas_MusicApp: App {
             }
             .tint(.green)
             .modifier(FullPlayerCover())
+            .sheet(isPresented: $router.showSleepTimer) {
+                SleepTimerSheetView()
+            }
             .onAppear {
                 setupAppearance()
                 dataManager.configure(with: sharedModelContainer.mainContext)
+                WatchBridge.shared.start()
                 if ProcessInfo.processInfo.arguments.contains("UI_TEST_RESET_LIBRARY") {
                     dataManager.resetLibraryForUITests()
                     PlaybackSessionStore.clear()
@@ -129,6 +141,14 @@ struct Owenisas_MusicApp: App {
                 player.restoreSession(songs: dataManager.toSongs(dataManager.fetchAllSongs()))
                 cleanupTemporaryFiles()
                 FeatureBootstrap.start()
+                #if DEBUG
+                if ProcessInfo.processInfo.arguments.contains("UI_TEST_FAIL_PLAYBACK") {
+                    let missing = Song(id: "ui-test-missing", title: "Missing audio", artist: "Test",
+                                       albumTitle: "Test", audioFileURL: documentsDirectoryURL.appendingPathComponent("ui-test-missing.wav"),
+                                       isFavorited: false)
+                    player.play(song: missing, in: [missing])
+                }
+                #endif
 
                 // Diagnostic: --ui-test-resolve=<videoId> runs the innertube
                 // resolve only and logs which client won.
@@ -149,6 +169,19 @@ struct Owenisas_MusicApp: App {
             }
             .onOpenURL { url in FeatureBootstrap.handle(url: url) }
             .modelContainer(sharedModelContainer)
+            } else {
+                VStack(spacing: 20) {
+                    Image(systemName: "externaldrive.badge.exclamationmark").font(.largeTitle)
+                    Text("Library unavailable").font(.title2).bold()
+                    Text("Your saved library could not be opened. Editing, importing and iCloud sync are paused to protect your data. Nothing has been reset or replaced.")
+                    Text("Free up device storage if needed, then retry. If this continues, restart the app or contact support before reinstalling.")
+                    Text(libraryStore.failureMessage ?? "Unable to open persistent storage.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Retry opening library") { libraryStore.retry() }
+                        .buttonStyle(.borderedProminent)
+                }
+                .multilineTextAlignment(.center).padding(30)
+            }
         }
     }
 
@@ -212,15 +245,39 @@ struct Owenisas_MusicApp: App {
     }
 }
 
-/// Presents the full player. Isolated in its own modifier so a player change
-/// re-renders only this, not the whole TabView (the App root used to observe
-/// the player and rebuild every tab on each song change).
+/// Errors are available from both the mini player and the presented full player.
+private struct PlaybackErrorAlert: ViewModifier {
+    @ObservedObject private var player = MusicPlayerManager.shared
+
+    func body(content: Content) -> some View {
+        content.alert("Playback unavailable", isPresented: Binding(
+            get: { player.playbackError != nil },
+            set: { presented in
+                guard !presented, let dismissedError = player.playbackError else { return }
+                // SwiftUI can reset the presentation binding during a view update.
+                // Publish afterwards, without clearing a newer playback failure.
+                DispatchQueue.main.async {
+                    if player.playbackError == dismissedError { player.playbackError = nil }
+                }
+            }
+        )) {
+            Button("Retry") { player.resume() }
+            Button("Skip track") { player.next() }
+            Button("Dismiss", role: .cancel) { player.playbackError = nil }
+        } message: {
+            Text(player.playbackError ?? "Check your audio output or re-import the audio file.")
+        }
+    }
+}
+
+/// Keep player observation out of the entire tab view.
 private struct FullPlayerCover: ViewModifier {
     @ObservedObject private var player = MusicPlayerManager.shared
 
     func body(content: Content) -> some View {
         content.fullScreenCover(isPresented: $player.showFullPlayer) {
-            NowPlayingView()
+            NowPlayingView().modifier(PlaybackErrorAlert())
         }
+        .modifier(PlaybackErrorAlert())
     }
 }

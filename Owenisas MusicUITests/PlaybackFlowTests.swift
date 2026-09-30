@@ -23,6 +23,68 @@ final class PlaybackFlowTests: XCTestCase {
         app.launch()
     }
 
+    @MainActor
+    func testPersistentStoreFailureBlocksLibraryAcrossRelaunchAndRetry() {
+        app.terminate()
+        app.launchArguments = ["UI_TEST_FAIL_PERSISTENT_STORE"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Library unavailable"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.tabBars.firstMatch.exists)
+        app.buttons["Retry opening library"].tap()
+        XCTAssertTrue(app.staticTexts["Library unavailable"].exists)
+        XCTAssertFalse(app.tabBars.firstMatch.exists)
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Library unavailable"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.tabBars.firstMatch.exists)
+    }
+
+    @MainActor
+    func testPlaybackFailureOffersRetrySkipAndDismiss() {
+        app.terminate()
+        app.launchArguments = ["UI_TEST_RESET_LIBRARY", "UI_TEST_FAIL_PLAYBACK"]
+        app.launch()
+        let alert = app.alerts["Playback unavailable"]
+        XCTAssertTrue(alert.waitForExistence(timeout: 5))
+        XCTAssertTrue(alert.buttons["Retry"].exists)
+        XCTAssertTrue(alert.buttons["Skip track"].exists)
+        XCTAssertTrue(alert.buttons["Dismiss"].exists)
+        alert.buttons["Dismiss"].tap()
+        XCTAssertFalse(alert.exists)
+    }
+
+    @MainActor
+    func testSleepTimerDeepLinkColdLaunchWithoutSong() throws {
+        XCTAssertFalse(app.buttons["Expand player"].exists)
+        app.terminate()
+        app.open(try XCTUnwrap(URL(string: "owenisas://sleeptimer")))
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        if springboard.buttons["Open"].waitForExistence(timeout: 2) {
+            springboard.buttons["Open"].tap()
+        }
+        XCTAssertTrue(app.staticTexts["Music will stop after the selected time"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["15 minutes"].exists)
+        let directory = ProcessInfo.processInfo.environment["TIMER_QA_DIR"].map { URL(fileURLWithPath: $0) }
+        if let directory {
+            try app.screenshot().pngRepresentation.write(to: directory.appendingPathComponent("cold-launch-timer-sheet.png"))
+        }
+        app.buttons["15 minutes"].tap()
+        XCTAssertFalse(app.staticTexts["Music will stop after the selected time"].exists)
+        // Run the real sheet -> player -> ActivityKit bridge, then capture the
+        // system surface. This is evidence, not an assertion that Island exists.
+        sleep(3)
+        XCUIDevice.shared.press(.home)
+        sleep(2)
+        if let directory {
+            try springboard.screenshot().pngRepresentation.write(to: directory.appendingPathComponent("native-system-island-attempt.png"))
+        }
+        // XCUIApplication.open relaunches its target and would intentionally
+        // lose an in-memory timer. Tap the actual system activity's widget URL.
+        springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.52, dy: 0.034)).tap()
+        XCTAssertTrue(app.staticTexts["Timer Active"].waitForExistence(timeout: 5))
+        app.buttons["Cancel Timer"].tap()
+    }
+
     // MARK: - Tab Navigation
 
     @MainActor

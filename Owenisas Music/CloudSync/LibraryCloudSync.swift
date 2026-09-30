@@ -493,21 +493,24 @@ final class LibraryCloudSync: ObservableObject, @unchecked Sendable {
         let plan = engine.reconcile(gathered, snapshot: snapshot, now: now, allowDestructive: allowDestructive,
                                     protectedSongIDs: store.cloudProtectedSongIDs)
         var removed = Set<String>()
+        var applyErrors: [String] = []
         if !plan.isEmpty {
             isApplying = true
-            store.applyCloudPlan(plan) { id in
+            let applied = store.applyCloudPlan(plan) { id in
                 let moved = engine.mirror.moveLocalFolderToHolding(id, now: now)
                 if moved { removed.insert(CloudSyncFiles.folderKey(id)) }
                 return moved
             }
             isApplying = false
+            if !applied { applyErrors.append("Could not save iCloud library changes. Retry sync after checking device storage.") }
         }
         let post = store.cloudSnapshot() ?? snapshot
         let output = engine.finishApply(postSnapshot: post, gathered: gathered, removedLocalFolders: removed, now: now)
-        publishStatus(output.mirrorPlan, errors: [])
+        publishStatus(output.mirrorPlan, errors: applyErrors)
 
         let mirror = engine.mirror
         let deviceID = engine.state.own.deviceID
+        let passErrors = applyErrors
         ioQueue.async {
             var published: Data?
             var writeError: String?
@@ -523,7 +526,7 @@ final class LibraryCloudSync: ObservableObject, @unchecked Sendable {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.finishPass(result, plan: output.mirrorPlan, published: published, writeError: writeError,
-                                    engine: engine, token: token)
+                                    engine: engine, token: token, applyErrors: passErrors)
                 }
             }
         }
@@ -531,7 +534,7 @@ final class LibraryCloudSync: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private func finishPass(_ result: MirrorExecutionResult, plan: MirrorPlan, published: Data?, writeError: String?,
-                            engine: CloudSyncEngine, token: Int) {
+                            engine: CloudSyncEngine, token: Int, applyErrors: [String]) {
         guard token == generation, self.engine === engine else { return }
         passInFlight = false
         engine.complete(result, plan: plan, publishedDigest: published, now: Date())
@@ -544,12 +547,13 @@ final class LibraryCloudSync: ObservableObject, @unchecked Sendable {
                 Song.invalidateSubtitleCache(forFolder: engine.mirror.localSongs.appendingPathComponent(name, isDirectory: true))
             }
             isApplying = false
+            MusicPlayerManager.shared.refreshLibrarySongs(DataManager.shared.toSongs(DataManager.shared.fetchAllSongs()))
             NotificationCenter.default.post(name: .init("SongsFolderChanged"), object: nil)
         }
         persistState()
 
         for error in result.errors { print("[DEBUG] CloudSync: \(error)") }
-        publishStatus(plan, errors: writeError.map { [$0] } ?? [])
+        publishStatus(plan, errors: applyErrors + (writeError.map { [$0] } ?? []), mirrorResult: result)
 
         // New songs need a merge for their likes and playlist slots.
         if rerunRequested || result.moreWork || !arrived.isEmpty {
@@ -574,10 +578,10 @@ final class LibraryCloudSync: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
-    private func publishStatus(_ plan: MirrorPlan, errors: [String]) {
+    func publishStatus(_ plan: MirrorPlan, errors: [String], mirrorResult: MirrorExecutionResult = .init()) {
         cloudSongCount = plan.songsInCloud
         cloudBytes = plan.bytesInCloud
-        if let error = errors.first {
+        if let error = (errors + mirrorResult.errors).first {
             status = .failed(error)
         } else if !queryGathered {
             status = .checking

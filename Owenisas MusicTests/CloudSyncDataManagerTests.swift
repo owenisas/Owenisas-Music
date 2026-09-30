@@ -26,6 +26,23 @@ struct CloudSyncDataManagerTests {
         return song
     }
 
+    @Test("Cloud apply refreshes the current song and every cached duplicate")
+    func cloudApplyRefreshesPlayer() throws {
+        let (manager, context) = try makeManager()
+        let a = song("cloud-cache-a", context)
+        try context.save()
+        let player = MusicPlayerManager.shared
+        player.stop()
+        defer { player.stop(); player.queue = [] }
+        player.queue = [Song.from(a), Song.from(a)]
+        player.currentSong = Song.from(a)
+        var plan = LibraryApplyPlan()
+        plan.songChanges[a.id] = .init(isFavorited: true, playCount: nil, lastPlayedDate: nil, playbackPosition: 600)
+        #expect(manager.applyCloudPlan(plan) { _ in true })
+        #expect(player.currentSong?.isFavorited == true)
+        #expect(player.queue.allSatisfy { $0.isFavorited && $0.savedPosition == 600 })
+    }
+
     @Test("Snapshot carries playlist ids, user order and covers")
     func snapshotShape() throws {
         let (manager, context) = try makeManager()
@@ -188,6 +205,15 @@ struct CloudSyncDataManagerTests {
         if UserDefaults.standard.object(forKey: CloudSyncConstants.enabledDefaultsKey) == nil {
             #expect(!sync.isEnabled) // defaults to off without an account
         }
+    }
+
+    @Test("Mirror failures reach user-facing status even when the own-library write succeeds")
+    func mirrorFailureStatus() {
+        let sync = LibraryCloudSync.shared
+        sync.publishStatus(MirrorPlan(), errors: [], mirrorResult: .init(errors: ["Upload failed: storage full"]))
+        #expect(sync.status == .failed("Upload failed: storage full"))
+        #expect(sync.status.text.contains("storage full"))
+        sync.refreshAvailability()
     }
 
     @Test("Status lines read naturally")

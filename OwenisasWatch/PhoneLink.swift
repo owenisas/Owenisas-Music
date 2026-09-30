@@ -256,6 +256,7 @@ final class PhoneLink: NSObject, ObservableObject {
         isActivated = session.activationState == .activated
         isReachable = session.isReachable
         companionAppInstalled = session.isCompanionAppInstalled
+        WatchWidgetBridge.shared.start()
     }
 
     nonisolated private func receive(_ dictionary: [String: Any]) {

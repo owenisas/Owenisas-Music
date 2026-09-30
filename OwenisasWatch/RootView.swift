@@ -45,6 +45,15 @@ struct RootView: View {
             .containerBackground(Color.owenisasGreen.gradient, for: .navigation)
             .navigationDestination(for: WatchRoute.self, destination: destination)
         }
+        .task { WatchWidgetBridge.shared.start() }
+        .onOpenURL { url in
+            guard let target = WatchWidgetDestination(url: url) else { return }
+            switch target {
+            case .phone: router.path = [.phoneNowPlaying]
+            case .watch: router.path = [player.hasTrack ? .watchNowPlaying : .offline]
+            case .downloads: router.path = [.offline]
+            }
+        }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
             offline.refreshFreeSpace()

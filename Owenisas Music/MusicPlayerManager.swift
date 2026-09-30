@@ -23,6 +23,9 @@ class MusicPlayerManager: NSObject, ObservableObject {
     static let shared = MusicPlayerManager()
 
     private var player: AVAudioPlayer?
+    /// Injectable start operation lets regression tests exercise play() == false.
+    private let startPlayback: (AVAudioPlayer) -> Bool
+    @Published var playbackError: String?
     private var secondaryPlayer: AVAudioPlayer?
     private var timer: AnyCancellable?
 
@@ -71,19 +74,19 @@ class MusicPlayerManager: NSObject, ObservableObject {
     private var hasRestoredSession = false
 
     // MARK: – Transition bookkeeping
-    /// Bumped on every track change/stop. Delayed work (crossfade settle,
-    /// skip-after-load-failure) captures it and no-ops if a newer change won.
+    /// Bumped on every track change/stop. Delayed crossfade settlement
+    /// captures it and no-ops if a newer change won.
     private var loadGeneration = 0
-    /// Consecutive tracks that failed to load; stops the skip loop when
-    /// every song in the queue is broken.
-    private var consecutiveLoadFailures = 0
     private var wasPlayingBeforeInterruption = false
 
     /// Public read-only playlist access
     var playlist: [Song] { queue }
 
     // MARK: - Init
-    override init() {
+    override convenience init() { self.init(startPlayback: { $0.play() }) }
+
+    init(startPlayback: @escaping (AVAudioPlayer) -> Bool) {
+        self.startPlayback = startPlayback
         super.init()
         do {
             try AVAudioSession.sharedInstance().setCategory(
@@ -170,11 +173,11 @@ class MusicPlayerManager: NSObject, ObservableObject {
 
     // MARK: - Play
     func play(song: Song, in playlist: [Song]? = nil) {
-        consecutiveLoadFailures = 0
         if let list = playlist {
             originalQueue = list
             if isShuffled {
-                var shuffled = list.filter { $0.id != song.id }
+                var shuffled = list
+                if let index = shuffled.firstIndex(where: { $0.id == song.id }) { shuffled.remove(at: index) }
                 shuffled.shuffle()
                 queue = [song] + shuffled
             } else {
@@ -204,7 +207,6 @@ class MusicPlayerManager: NSObject, ObservableObject {
     /// so looking it up by id could pick the wrong copy).
     func playFromQueue(at index: Int) {
         guard queue.indices.contains(index) else { return }
-        consecutiveLoadFailures = 0
         currentIndex = index
         loadAndPlay(queue[index])
     }
@@ -219,10 +221,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
         let nextIndex = currentIndex + 1
         if nextIndex <= queue.count {
             queue.insert(song, at: nextIndex)
-            // Also update original queue if it contains the song
-            if !originalQueue.contains(where: { $0.id == song.id }) {
-                originalQueue.append(song)
-            }
+            if isShuffled { originalQueue.append(song) } else { originalQueue = queue }
         }
         saveSession()
     }
@@ -234,36 +233,36 @@ class MusicPlayerManager: NSObject, ObservableObject {
         }
 
         queue.append(song)
-        if !originalQueue.contains(where: { $0.id == song.id }) {
-            originalQueue.append(song)
-        }
+        originalQueue.append(song)
         saveSession()
     }
 
     func moveInQueue(from source: IndexSet, to destination: Int) {
+        guard source.allSatisfy({ queue.indices.contains($0) }), (0...queue.count).contains(destination) else { return }
+        var slots = Array(queue.indices)
+        slots.move(fromOffsets: source, toOffset: destination)
+        let oldIndex = currentIndex
         queue.move(fromOffsets: source, toOffset: destination)
         originalQueue = queue
-
-        // Re-calculate currentIndex
-        if let current = currentSong, let idx = queue.firstIndex(where: { $0.id == current.id }) {
-            currentIndex = idx
-        }
+        currentIndex = slots.firstIndex(of: oldIndex) ?? 0
         saveSession()
     }
 
     func removeFromQueue(at offsets: IndexSet) {
-        let currentId = currentSong?.id
-        let removedSongs = offsets.compactMap { index in
-            index < queue.count ? queue[index] : nil
+        let valid = IndexSet(offsets.filter { queue.indices.contains($0) })
+        guard !valid.isEmpty else { return }
+        let removedCurrent = valid.contains(currentIndex)
+        let shiftedIndex = currentIndex - valid.filter { $0 < currentIndex }.count
+        // Remove matching occurrences, not every copy of a song id.
+        for index in valid.reversed() {
+            let id = queue[index].id
+            let occurrence = queue[...index].filter { $0.id == id }.count - 1
+            let matches = originalQueue.indices.filter { originalQueue[$0].id == id }
+            if matches.indices.contains(occurrence) { originalQueue.remove(at: matches[occurrence]) }
         }
-        queue.remove(atOffsets: offsets)
-        let removedIDs = Set(removedSongs.map { $0.id })
-        originalQueue.removeAll { removedIDs.contains($0.id) }
-        
-        if let currentId = currentId, let idx = queue.firstIndex(where: { $0.id == currentId }) {
-            // Current song is still in the queue, just update its index!
-            currentIndex = idx
-        } else {
+        queue.remove(atOffsets: valid)
+        currentIndex = shiftedIndex
+        if removedCurrent {
             // Current song was removed.
             if queue.isEmpty {
                 stop()
@@ -290,7 +289,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
         // Capture the position before stop() resets currentIndex to 0, so that
         // removing the current track advances to the song that shifts into its
         // slot rather than restarting from the top of the queue.
-        let savedIndex = currentIndex
+        let savedIndex = currentIndex - queue.prefix(currentIndex).filter { $0.id == songId }.count
         if removedCurrentSong {
             stop()
         }
@@ -309,9 +308,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
             return
         }
         
-        if let current = currentSong, let idx = queue.firstIndex(where: { $0.id == current.id }) {
-            currentIndex = idx
-        }
+        currentIndex = min(savedIndex, queue.count - 1)
         saveSession()
     }
 
@@ -329,7 +326,14 @@ class MusicPlayerManager: NSObject, ObservableObject {
         if player.duration > 0 && player.currentTime >= player.duration - 0.5 {
             player.currentTime = 0
         }
-        player.play()
+        guard startPlayback(player) else {
+            playbackError = "Playback could not start. Check your audio output, then tap Retry."
+            isPlaying = false
+            stopTimer()
+            updateNowPlayingInfo()
+            return
+        }
+        playbackError = nil
         player.rate = playbackRate
         isPlaying = true
         startTimer()
@@ -365,7 +369,6 @@ class MusicPlayerManager: NSObject, ObservableObject {
         persistPlaybackPosition()
         stopTimer()
         loadGeneration += 1
-        let generation = loadGeneration
         // Kill BOTH players. Leaving a crossfade's incoming player alive made
         // two songs play at once, and its pending settle swapped it back in.
         secondaryPlayer?.stop()
@@ -394,33 +397,28 @@ class MusicPlayerManager: NSObject, ObservableObject {
             if let p = player {
                 applyResumePosition(for: song, on: p)
             }
-            player?.play()
-            player?.rate = playbackRate
+            guard let player, startPlayback(player) else {
+                throw NSError(domain: "MusicPlayer", code: 501,
+                              userInfo: [NSLocalizedDescriptionKey: "Playback could not start. Check your audio output and retry."])
+            }
+            playbackError = nil
+            player.rate = playbackRate
             isPlaying = true
-            consecutiveLoadFailures = 0
             startTimer()
             updateNowPlayingInfo()
             updateListeningHistory(song)
             saveSession()
         } catch {
+            isPlaying = false
+            playbackError = "Could not play \(song.title): \(error.localizedDescription). Retry, skip this track, or re-import its audio file."
+            updateNowPlayingInfo()
             print("Error playing \(song.title): \(error)")
             NSLog("OWENISAS_PLAYER: load failed for %@ at %@: %@", song.title, song.audioFileURL.path, "\(error)")
-            consecutiveLoadFailures += 1
-            duration = 0
-            currentTime = 0
-            // Every track in the queue is broken: stop instead of cycling forever.
-            guard consecutiveLoadFailures < max(queue.count, 1) else {
-                consecutiveLoadFailures = 0
-                isPlaying = false
-                updateNowPlayingInfo()
-                return
-            }
-            // Skip to the next track — unless the user picked another song
-            // in the meantime (the old unconditional skip jumped past it).
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                guard let self, self.loadGeneration == generation else { return }
-                self.next()
-            }
+            duration = player?.duration ?? 0
+            currentTime = player?.currentTime ?? 0
+            // Keep this track selected until the listener retries or skips.
+            // A delayed automatic skip races the actionable error UI.
+            updateNowPlayingInfo()
         }
     }
 
@@ -479,7 +477,11 @@ class MusicPlayerManager: NSObject, ObservableObject {
             currentTime = 0
             applyResumePosition(for: song, on: newPlayer)
             print("[DEBUG] MusicPlayer: Starting crossfade to: \(song.title)")
-            newPlayer.play()
+            guard startPlayback(newPlayer) else {
+                throw NSError(domain: "MusicPlayer", code: 501,
+                              userInfo: [NSLocalizedDescriptionKey: "Playback could not start. Check your audio output and retry."])
+            }
+            playbackError = nil
             newPlayer.rate = playbackRate
 
             // Crossfade
@@ -487,7 +489,6 @@ class MusicPlayerManager: NSObject, ObservableObject {
             newPlayer.setVolume(1.0, fadeDuration: crossfadeDuration)
 
             isPlaying = true
-            consecutiveLoadFailures = 0
             startTimer()
             updateNowPlayingInfo()
             updateListeningHistory(song)
@@ -606,7 +607,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
         isPlaying = false
         guard let restoredPlayer = try? Self.makeAudioPlayer(for: song.audioFileURL) else {
             // File missing/corrupt: keep the queue visible; resume() falls
-            // back to a fresh loadAndPlay which auto-skips on failure.
+            // back to a fresh loadAndPlay with an actionable error on failure.
             duration = 0
             currentTime = 0
             return
@@ -619,6 +620,20 @@ class MusicPlayerManager: NSObject, ObservableObject {
         let clamped = min(max(0, position), max(0, restoredPlayer.duration - 1))
         restoredPlayer.currentTime = clamped
         currentTime = clamped
+        updateNowPlayingInfo()
+    }
+
+    /// Refresh value snapshots after a successful cloud apply/index. Never seek
+    /// the loaded track: its live position wins over another device's resume.
+    func refreshLibrarySongs(_ songs: [Song]) {
+        let byID = Dictionary(songs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        queue = queue.map { byID[$0.id] ?? $0 }
+        originalQueue = originalQueue.map { byID[$0.id] ?? $0 }
+        if let current = currentSong, let refreshed = byID[current.id] { currentSong = refreshed }
+        let loadedSongID = (secondaryPlayer ?? player) != nil ? currentSong?.id : nil
+        for song in songs where song.id != loadedSongID {
+            resumePositions[song.id] = song.savedPosition
+        }
         updateNowPlayingInfo()
     }
 
@@ -639,12 +654,8 @@ class MusicPlayerManager: NSObject, ObservableObject {
         }
         
         // Sync the internal player queues correctly so when `next` plays, it still displays the Like correctly
-        if let idx = queue.firstIndex(where: { $0.id == songId }) {
-            queue[idx].isFavorited.toggle()
-        }
-        if let idx = originalQueue.firstIndex(where: { $0.id == songId }) {
-            originalQueue[idx].isFavorited.toggle()
-        }
+        for idx in queue.indices where queue[idx].id == songId { queue[idx].isFavorited.toggle() }
+        for idx in originalQueue.indices where originalQueue[idx].id == songId { originalQueue[idx].isFavorited.toggle() }
     }
 
     // MARK: - Pause / Stop
@@ -652,8 +663,7 @@ class MusicPlayerManager: NSObject, ObservableObject {
         // Pausing mid-crossfade used to pause only the outgoing track while
         // the incoming one kept playing behind a "paused" UI.
         finishCrossfade()
-        // Also cancels a pending skip-after-failed-load: pausing (or a call /
-        // unplugged headphones) must not be followed by a track starting.
+        // Cancel delayed crossfade settlement after pausing.
         loadGeneration += 1
         player?.pause()
         isPlaying = false
@@ -674,7 +684,6 @@ class MusicPlayerManager: NSObject, ObservableObject {
     func stop() {
         persistPlaybackPosition()
         loadGeneration += 1
-        consecutiveLoadFailures = 0
         player?.stop()
         player = nil
         secondaryPlayer?.stop()
@@ -748,7 +757,6 @@ class MusicPlayerManager: NSObject, ObservableObject {
         persistPlaybackPosition()
         stopTimer()
         loadGeneration += 1
-        consecutiveLoadFailures = 0
         secondaryPlayer?.stop()
         secondaryPlayer = nil
         player?.stop()
@@ -763,15 +771,16 @@ class MusicPlayerManager: NSObject, ObservableObject {
         isShuffled.toggle()
         if let current = currentSong {
             if isShuffled {
-                var rest = queue.filter { $0.id != current.id }
+                var rest = queue
+                if rest.indices.contains(currentIndex) { rest.remove(at: currentIndex) }
                 rest.shuffle()
                 queue = [current] + rest
                 currentIndex = 0
             } else {
+                let occurrence = queue.prefix(currentIndex + 1).filter { $0.id == current.id }.count - 1
                 queue = originalQueue
-                if let idx = queue.firstIndex(where: { $0.id == current.id }) {
-                    currentIndex = idx
-                }
+                let matches = queue.indices.filter { queue[$0].id == current.id }
+                currentIndex = matches.indices.contains(occurrence) ? matches[occurrence] : (matches.first ?? 0)
             }
         } else {
             // If nothing is playing, just shuffle the whole queue

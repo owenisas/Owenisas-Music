@@ -10,6 +10,68 @@ import Testing
 @Suite(.serialized)
 struct SessionRestoreTests {
 
+    @Test("False play result is visible and never reported as playing; retry clears the error")
+    func falsePlayResult() throws {
+        let (song, url) = try makeWAV(seconds: 2)
+        defer { try? FileManager.default.removeItem(at: url) }
+        var canStart = false
+        let player = MusicPlayerManager(startPlayback: { _ in canStart })
+        defer { player.stop() }
+        player.play(song: song, in: [song])
+        #expect(!player.isPlaying)
+        #expect(player.playbackError?.contains("retry") == true)
+        player.resume()
+        #expect(!player.isPlaying)
+        #expect(player.playbackError != nil)
+        canStart = true
+        player.resume()
+        #expect(player.isPlaying)
+        #expect(player.playbackError == nil)
+    }
+
+    @Test("Cloud refresh updates metadata without seeking current audio and replaces inactive cached resume positions")
+    func cloudRefreshResumeCache() throws {
+        let (long, url) = try makeWAV(seconds: 720)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let other = Song(id: "other", title: "Other", artist: "Artist", albumTitle: "Album", audioFileURL: url, isFavorited: false)
+        let player = MusicPlayerManager(startPlayback: { _ in true })
+        defer { player.stop() }
+        player.play(song: long, in: [long, other, long])
+        player.seek(to: 100)
+        player.pause()
+        var updated = long
+        updated.title = "Cloud title"
+        updated.isFavorited = true
+        updated.savedPosition = 300
+        player.refreshLibrarySongs([updated])
+        #expect(player.currentSong?.title == "Cloud title")
+        #expect(player.currentTime == 100)
+        player.playFromQueue(at: 1) // saves local 100 for the long track
+        player.refreshLibrarySongs([updated]) // cloud now owns inactive resume
+        player.playFromQueue(at: 2)
+        #expect(player.currentTime == 300)
+        #expect(player.currentSong?.isFavorited == true)
+        player.pause()
+        player.toggleShuffle()
+        player.toggleShuffle()
+        #expect(player.queue.filter { $0.id == long.id }.allSatisfy { $0.title == "Cloud title" })
+    }
+
+    private func makeWAV(seconds: Int) throws -> (Song, URL) {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("wav")
+        let count = seconds * 8_000 * 2
+        var data = Data("RIFF".utf8)
+        func append32(_ value: Int) { var n = UInt32(value).littleEndian; withUnsafeBytes(of: &n) { data.append(contentsOf: $0) } }
+        func append16(_ value: Int) { var n = UInt16(value).littleEndian; withUnsafeBytes(of: &n) { data.append(contentsOf: $0) } }
+        append32(36 + count)
+        data.append(Data("WAVEfmt ".utf8))
+        append32(16); append16(1); append16(1); append32(8_000); append32(16_000); append16(2); append16(16)
+        data.append(Data("data".utf8)); append32(count)
+        data.append(Data(repeating: 0, count: count))
+        try data.write(to: url)
+        return (Song(id: url.lastPathComponent, title: "Audio", artist: "Artist", albumTitle: "Album", audioFileURL: url, isFavorited: false), url)
+    }
+
     // MARK: - Helpers
 
     private func makeSong(id: String) -> Song {

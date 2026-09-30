@@ -115,6 +115,7 @@ extension DataManager: CloudLibraryStore {
             print("[DEBUG] DataManager: iCloud merge save failed: \(error.localizedDescription)")
             return false
         }
+        MusicPlayerManager.shared.refreshLibrarySongs(toSongs(songs.filter { plan.songChanges[$0.id] != nil }))
         if playlistsChanged {
             NotificationCenter.default.post(name: .init("PlaylistsChanged"), object: nil)
         }
