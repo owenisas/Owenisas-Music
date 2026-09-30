@@ -1,6 +1,6 @@
 # Owenisas Music App Store release
 
-Last updated: 2026-09-29
+Last updated: 2026-09-30
 
 ## Candidate and authorization
 
@@ -16,8 +16,9 @@ Last updated: 2026-09-29
 
 - ASC app: `6760303576`, bundle `com.Owenisas-Music`.
 - App Store `1.0` is `READY_FOR_DISTRIBUTION`.
-- Latest uploaded `1.1 / 202609231913` is `VALID`, `APP_STORE_ELIGIBLE`, internal `IN_BETA_TESTING`, external `READY_FOR_BETA_SUBMISSION`.
-- No active review submission; three historical submissions are `COMPLETE`.
+- Current `1.1 / 202609292344` (`b211a945-881c-4148-bb40-7f24a2f7ac1c`) is `VALID`, unexpired, `APP_STORE_ELIGIBLE`, internal `IN_BETA_TESTING`, external `WAITING_FOR_BETA_REVIEW`.
+- Exact build is assigned to external public group `2f2c9598-c4fc-4248-838d-376fe262cad4`; Beta App Review submission is `WAITING_FOR_REVIEW` (submitted September 30 at 00:00:19 PDT). Public recruitment remains blocked pending Apple approval.
+- Older `1.1 / 202609231913` is not the current feature/safety release.
 - Existing en-US screenshots: one iPhone 6.5-inch and one iPad Pro 12.9-inch, both `COMPLETE`. Current-candidate visual coverage still required.
 - Local release host unsuitable: macOS `27.2 / 26B5091g`, Xcode `27.0 / 27A266a` beta. Mac mini SSH timed out. Do not archive a release locally.
 - Existing EAS production signing environment variable names are present; secret values were not retrieved. Prior successful cloud release used the old single-target version.
@@ -55,13 +56,22 @@ Integrated simulator unit evidence: **338 passed, 0 failed, 2 skipped** (`build/
 
 ### Cloud and ingestion evidence
 
-- Manual-signing build `9701d061-595d-458c-b076-398eec2ed820` finished successfully from source `faa2869`, using stable Xcode `26.4.1 / 17F6`, iOS SDK `26.4` and worker OS build `25E245`.
+- Manual-signing build `9701d061-595d-458c-b076-398eec2ed820` finished successfully from source `faa2869`, using stable Xcode `26.4.1 / 17E202`, iOS SDK `26.4` and worker OS build `25E253`.
 - Exact `1.1 / 202609292030` IPA passed strict distribution-signature verification for all five bundles. Bundle versions, App Groups and privacy manifests agree; the main executable has Production iCloud, CloudDocuments and ubiquity-container entitlements.
 - Apple upload `6c176798-8c0a-4c29-8c77-3c74e571294f` was committed, but ingestion failed with `90626 Invalid Siri Support`: four intent descriptions and the Watch device enum used reserved `iPhone` names. It never became an ASC build or TestFlight-ready.
 - The current successor replaces only the rejected static metadata wording (and the SDK-27 counterpart); playback, identifiers, runtime dialogs and downloader behavior are unchanged. Build number is bumped to `202609292344` across the project and EAS config.
 - The new compiled App Intent gate checks the archived app and nested bundles before export. It reproduced all seven locations in the actually rejected IPA; source/compiled metadata and signing tests now total **32 passing**, alongside **7 widget integration tests**.
 
-Not yet verified for the metadata-fixed successor: fresh cloud archive/export, exact successor IPA, ASC `VALID`, external Beta App Review approval and usable public-group assignment. Prior binary validation is not transferred to the new candidate.
+### Current successor distribution
+
+- Source `3378f42ecce81f8f0e08e62661beff6a692476bf` is pushed and remote-verified. EAS build `8a4af6a6-e60d-4772-8310-243edcefdc96` finished on stable Xcode `26.4.1 / 17E202`.
+- Exact IPA SHA-256: `424034defdfab8658f8a94a8980e05a214c85b5061a934fc47fcd2e51d147ebb`. All five distribution bundles passed strict signature, version/build, App Group and privacy checks; main Production iCloud is verified. Compiled App Intent reserved-name checks passed for all four metadata-bearing bundles.
+- ASC upload/build `b211a945-881c-4148-bb40-7f24a2f7ac1c` reached ingestion `COMPLETE` and processing `VALID`. Expiration: December 28, 2026 at 22:57:46 PST. Internal state: `IN_BETA_TESTING`.
+- Candidate-specific en-US What to Test notes were written and read back. Public external group membership was independently verified through both build-group lookup and the exact group's build relationship.
+- External Beta App Review was submitted and read back as `WAITING_FOR_REVIEW`; external build state remains `WAITING_FOR_BETA_REVIEW` after bounded observation. The public link `https://testflight.apple.com/join/HHqw7nsT` still says it is not accepting new testers. Assignment is complete, but external approval and public installability are **not** complete.
+- No paid upgrade, certificate revocation or downloader implementation change occurred. No App Store review submission was made in this distribution step.
+
+Remaining release gates: Apple's external Beta App Review approval and subsequent public-link verification; expanded Island/native Lock Screen and physical Siri/Watch/iCloud runtime QA; exact-candidate App Store screenshots/metadata and any separately approved App Store submission.
 
 ## Draft 1.1 release notes
 
