@@ -5,11 +5,12 @@ Last updated: 2026-09-29
 ## Candidate and authorization
 
 - Source baseline: `cb5cd01fa1e8301107505f1adb0232e332a2c598`, branch `overhaul/playback-downloader-sync`.
-- Successor: marketing version `1.1`, build `202609292030`; source changes are not yet committed or pushed.
+- Successor: marketing version `1.1`, build `202609292030`; feature candidate `55013eb` is pushed and remote-verified. The signing workflow recovery is a subsequent source change on the same branch.
 - Operator requested audit followed by App Store submission, with downloader changes deferred.
 - Operator separately approved uploading source to the existing EAS project using free quota only. No paid upgrade or spend approved.
 - Preserve existing production variant (`APP_STORE`, `OWENISAS_DISTRIBUTION=appstore`); no downloader implementation changes. This existing variant is import-only, unlike the personal/TestFlight variant.
-- Apple upload, exact version/build attachment, metadata changes and final review submission require their explicit release-stage approval after validation.
+- TestFlight upload, external Beta App Review, and assignment of an unexpired approved build to the existing public group are explicitly authorized. Final App Store review submission is a separate gate.
+- Signing remediation is approved: register the Watch widget identifier, associate the existing App Group with both Watch identifiers, and create profiles for all five bundles using the existing distribution certificate. No certificate revocation, paid upgrade or spend is authorized.
 
 ## Live state checked
 
@@ -38,10 +39,21 @@ Confirmed risks under remediation:
 Parent changes prepared:
 - required-reason privacy manifests for Watch, Share and Widget; main App Group/file-picker reasons;
 - privacy-policy wording reconciled with default-on iCloud transfer and propagated deletions;
-- production cloud workflow uses multi-target automatic provisioning, successor-bound version/build checks, per-product privacy checks, and validate-only Apple step;
+- production cloud workflow uses verified per-target manual App Store profiles, successor-bound version/build checks, per-product privacy checks, and validate-only Apple step; automatic provisioning is deliberately disabled.
 - EAS source archive excludes backend, credentials, personal cookies, logs, historical experiments and unrelated tooling.
 
-Not yet verified: final integrated tests, current-candidate visual runtime, non-beta cloud archive/export, final IPA signatures/entitlements/privacy resources, ASC successor upload, 1.1 metadata/attachment and review submission.
+Integrated simulator unit evidence: **338 passed, 0 failed, 2 skipped** (`build/timer-qa/full-green.xcresult`). Focused post-SDK-guard Siri tests: **19 passed**. Sleep timer deep-link/UI test passed; compact native simulator Dynamic Island was inspected. Expanded Island, native Lock Screen, physical Siri/Watch/iCloud behavior remain unverified.
+
+### Signing recovery
+
+- First EAS attempt `c39ed09c-152a-4c90-879a-e12cb825ac6d` failed before compilation: automatic signing requested missing Apple Development keys/profiles and suggested certificate revocation. No revocation was performed.
+- Both Watch identifiers now have `group.com.Owenisas-Music` assigned, verified by reopening each Developer Portal configuration.
+- Five ACTIVE App Store profiles were created and downloaded through ASC. Their certificate fingerprints match the existing cloud-imported P12 identity; all contain the App Group, and the main profile permits its iCloud container and Production environment.
+- Five project-scoped production SECRET profile variables are configured in the existing EAS project. No profile contents or keys are committed or logged.
+- `.eas/build/install-profiles.py` rejects wrong team/bundle, development/ad hoc/enterprise scope, missing App Group/iCloud, expiry and certificate mismatch before installing anything. It creates the explicit five-bundle export map. Cloud-only target rewrites preserve Debug signing and inherited extension flags.
+- Local signing regression suite: **22 passed**; widget integration suite: **7 passed**. Real-profile install, per-target project rewrite and export-map rehearsal passed without a local archive. Profiles are installed into both modern Xcode and legacy discovery directories; CloudDocuments and ubiquity-container permissions are also validated, including Apple's legitimate wildcard service grants.
+
+Not yet verified: successful non-beta cloud archive/export, exact IPA signatures/entitlements/privacy resources, ASC successor upload/VALID state, external Beta App Review and usable public-group assignment. The previous uploaded build does not contain the new feature/safety changes.
 
 ## Draft 1.1 release notes
 

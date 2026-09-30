@@ -23,6 +23,8 @@ fastlane/
 *.dSYM/
 xcuserdata/
 .DS_Store
+**/__pycache__/
+**/*.pyc
 node_modules/
 DerivedData/
 build/
@@ -45,3 +47,4 @@ fastlane/report.xml
 !.eas/
 !.eas/build/
 !.eas/build/production-ios.yml
+!.eas/build/install-profiles.py

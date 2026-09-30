@@ -45,23 +45,43 @@ build:
           mkdir -p "$HOME/.appstoreconnect/private_keys"
           echo "$OWENISAS_MUSIC_ASC_P8_B64" | base64 -D > "$HOME/.appstoreconnect/private_keys/AuthKey_${OWENISAS_MUSIC_ASC_KEY_ID}.p8"
     - run:
+        name: Install verified App Store profiles and configure manual release signing
+        command: |
+          set -eo pipefail
+          python3 .eas/build/install-profiles.py
+          ruby <<'RUBY'
+          require 'json'
+          require 'xcodeproj'
+          settings = JSON.parse(File.read('signing-settings.json'))
+          project = Xcodeproj::Project.open('Owenisas Music.xcodeproj')
+          configured = []
+          project.targets.each do |target|
+            target.build_configurations.select { |config| config.name == 'Release' }.each do |config|
+              bundle = config.build_settings['PRODUCT_BUNDLE_IDENTIFIER']
+              next unless settings['profiles'].key?(bundle)
+              config.build_settings['CODE_SIGN_STYLE'] = 'Manual'
+              config.build_settings['DEVELOPMENT_TEAM'] = settings['teamID']
+              config.build_settings['CODE_SIGN_IDENTITY'] = settings['identity']
+              config.build_settings['PROVISIONING_PROFILE_SPECIFIER'] = settings['profiles'].fetch(bundle)
+              configured << bundle
+            end
+          end
+          abort 'Missing or duplicate release signing target' unless configured.sort == settings['profiles'].keys.sort
+          project.save
+          puts 'Configured all five Release targets for manual App Store signing'
+          RUBY
+    - run:
         name: Archive Owenisas Music
         command: |
           set -eo pipefail
-          # Automatic signing through the API key covers the app's iCloud and
-          # App Group entitlements plus share, iPhone widget, Watch and Watch widget.
-          # Preserve extension-specific compilation flags in the global override.
+          # Verified per-target App Store profiles avoid automatic development
+          # certificate creation/revocation and preserve extension-specific flags.
           KC="$PWD/owenisas-music-ci.keychain-db"
           security unlock-keychain -p ci "$KC"
-          KEY="$HOME/.appstoreconnect/private_keys/AuthKey_${OWENISAS_MUSIC_ASC_KEY_ID}.p8"
           xcodebuild -project 'Owenisas Music.xcodeproj' -scheme 'Owenisas Music' -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$PWD/Owenisas Music.xcarchive" \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$KEY" \
-            -authenticationKeyID "$OWENISAS_MUSIC_ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$OWENISAS_MUSIC_ASC_ISSUER_ID" \
-            CODE_SIGN_STYLE=Automatic \
+            CODE_SIGN_STYLE=Manual \
             DEVELOPMENT_TEAM=3LHSL95J9H \
             OTHER_CODE_SIGN_FLAGS="--keychain $KC" \
             'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) APP_STORE' \
@@ -101,25 +121,11 @@ build:
           set -eo pipefail
           KC="$PWD/owenisas-music-ci.keychain-db"
           security unlock-keychain -p ci "$KC"
-          KEY="$HOME/.appstoreconnect/private_keys/AuthKey_${OWENISAS_MUSIC_ASC_KEY_ID}.p8"
-          cat > "$PWD/ExportOptions.plist" <<'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-            <key>destination</key><string>export</string>
-            <key>method</key><string>app-store-connect</string>
-            <key>signingStyle</key><string>automatic</string>
-            <key>teamID</key><string>3LHSL95J9H</string>
-          </dict></plist>
-          PLIST
+          test -f "$PWD/ExportOptions.plist"
           xcodebuild -exportArchive \
             -archivePath "$PWD/Owenisas Music.xcarchive" \
             -exportPath "$PWD/export" \
             -exportOptionsPlist "$PWD/ExportOptions.plist" \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$KEY" \
-            -authenticationKeyID "$OWENISAS_MUSIC_ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$OWENISAS_MUSIC_ASC_ISSUER_ID" \
             OTHER_CODE_SIGN_FLAGS="--keychain $KC"
     - eas/upload_artifact:
         name: Upload Owenisas Music IPA artifact
