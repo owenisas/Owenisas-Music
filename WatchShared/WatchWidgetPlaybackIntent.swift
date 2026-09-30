@@ -5,7 +5,7 @@ import Foundation
 enum WatchPlaybackTarget: String, AppEnum {
     case phone, watch
     static let typeDisplayRepresentation: TypeDisplayRepresentation = "Playback Device"
-    static let caseDisplayRepresentations: [Self: DisplayRepresentation] = [.phone: "iPhone", .watch: "This Watch"]
+    static let caseDisplayRepresentations: [Self: DisplayRepresentation] = [.phone: "Phone", .watch: "This Watch"]
 }
 struct WatchWidgetToggleIntent: AudioPlaybackIntent {
     static let title: LocalizedStringResource = "Play or Pause on Selected Device"

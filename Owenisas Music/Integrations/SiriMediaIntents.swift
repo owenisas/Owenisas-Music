@@ -36,7 +36,7 @@ extension SiriLibraryService {
 @available(iOS 27.0, *)
 struct PlayLibraryAudioIntent: AudioPlaybackIntent {
     static let title: LocalizedStringResource = "Play Library Audio"
-    static let description = IntentDescription("Resolve an iOS 27 audio search against the local iPhone library.")
+    static let description = IntentDescription("Resolve an audio search against the local music library.")
     @Parameter(title: "Audio Search") var audioEntity: AudioSearch
 
     @MainActor func perform() async throws -> some IntentResult {

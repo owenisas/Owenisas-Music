@@ -2,7 +2,7 @@ import AppIntents
 
 struct PlaySongIntent: AudioPlaybackIntent {
     static let title: LocalizedStringResource = "Play Song"
-    static let description = IntentDescription("Play an imported song on your iPhone. Select by title and artist.")
+    static let description = IntentDescription("Play an imported song from your library. Select by title and artist.")
     static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
     @Parameter(title: "Song") var song: SongEntity
     static var parameterSummary: some ParameterSummary { Summary("Play \(\.$song)") }
@@ -17,7 +17,7 @@ struct PlaySongIntent: AudioPlaybackIntent {
 
 struct PlayPlaylistIntent: AudioPlaybackIntent {
     static let title: LocalizedStringResource = "Play Playlist"
-    static let description = IntentDescription("Play a local playlist on your iPhone in its saved order. Missing audio is skipped.")
+    static let description = IntentDescription("Play a local playlist in its saved order. Missing audio is skipped.")
     static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
     @Parameter(title: "Playlist") var playlist: PlaylistEntity
     static var parameterSummary: some ParameterSummary { Summary("Play \(\.$playlist)") }
@@ -55,7 +55,7 @@ struct PauseMusicIntent: AudioPlaybackIntent {
 
 struct LikeCurrentSongIntent: AudioPlaybackIntent {
     static let title: LocalizedStringResource = "Like Current Song"
-    static let description = IntentDescription("Add the current iPhone song to Liked Songs. Does not unlike an already liked song.")
+    static let description = IntentDescription("Add the current song to Liked Songs. Does not unlike an already liked song.")
     static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
     init() {}
     @MainActor func perform() async throws -> some IntentResult & ProvidesDialog {

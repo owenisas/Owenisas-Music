@@ -9,7 +9,7 @@
     ],
     "ios": {
       "bundleIdentifier": "com.Owenisas-Music",
-      "buildNumber": "202609292030",
+      "buildNumber": "202609292344",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }

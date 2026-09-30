@@ -48,3 +48,4 @@ fastlane/report.xml
 !.eas/build/
 !.eas/build/production-ios.yml
 !.eas/build/install-profiles.py
+!.eas/build/validate-app-intents.py

@@ -23,7 +23,7 @@ struct WidgetPlaylistQuery: EntityQuery {
 }
 struct PlaylistWidgetConfiguration: WidgetConfigurationIntent {
     static let title: LocalizedStringResource = "Choose Playlist"
-    static let description = IntentDescription("Pin Liked Songs or a playlist from your iPhone library.")
+    static let description = IntentDescription("Pin Liked Songs or a playlist from your library.")
     @Parameter(title: "Playlist") var playlist: WidgetPlaylistEntity?
 }
 struct PlayWidgetPlaylistIntent: AudioPlaybackIntent {

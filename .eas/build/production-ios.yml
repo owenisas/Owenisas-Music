@@ -88,6 +88,7 @@ build:
             OWENISAS_DISTRIBUTION=appstore \
             archive
           APP="$PWD/Owenisas Music.xcarchive/Products/Applications/Owenisas Music.app"
+          python3 .eas/build/validate-app-intents.py "$APP"
           EXPECTED_BUILD=$(node -p "require('./app.json').expo.ios.buildNumber")
           EXPECTED_VERSION=$(node -p "require('./app.json').expo.version")
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")" = "$EXPECTED_BUILD"

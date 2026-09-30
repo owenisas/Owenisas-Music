@@ -5,7 +5,7 @@ Last updated: 2026-09-29
 ## Candidate and authorization
 
 - Source baseline: `cb5cd01fa1e8301107505f1adb0232e332a2c598`, branch `overhaul/playback-downloader-sync`.
-- Successor: marketing version `1.1`, build `202609292030`; feature candidate `55013eb` is pushed and remote-verified. The signing workflow recovery is a subsequent source change on the same branch.
+- Successor: marketing version `1.1`, build `202609292344`; feature candidate `55013eb` and signing recovery `faa2869` are pushed and remote-verified. The current successor also fixes Apple's Siri metadata ingestion rejection.
 - Operator requested audit followed by App Store submission, with downloader changes deferred.
 - Operator separately approved uploading source to the existing EAS project using free quota only. No paid upgrade or spend approved.
 - Preserve existing production variant (`APP_STORE`, `OWENISAS_DISTRIBUTION=appstore`); no downloader implementation changes. This existing variant is import-only, unlike the personal/TestFlight variant.
@@ -53,7 +53,15 @@ Integrated simulator unit evidence: **338 passed, 0 failed, 2 skipped** (`build/
 - `.eas/build/install-profiles.py` rejects wrong team/bundle, development/ad hoc/enterprise scope, missing App Group/iCloud, expiry and certificate mismatch before installing anything. It creates the explicit five-bundle export map. Cloud-only target rewrites preserve Debug signing and inherited extension flags.
 - Local signing regression suite: **22 passed**; widget integration suite: **7 passed**. Real-profile install, per-target project rewrite and export-map rehearsal passed without a local archive. Profiles are installed into both modern Xcode and legacy discovery directories; CloudDocuments and ubiquity-container permissions are also validated, including Apple's legitimate wildcard service grants.
 
-Not yet verified: successful non-beta cloud archive/export, exact IPA signatures/entitlements/privacy resources, ASC successor upload/VALID state, external Beta App Review and usable public-group assignment. The previous uploaded build does not contain the new feature/safety changes.
+### Cloud and ingestion evidence
+
+- Manual-signing build `9701d061-595d-458c-b076-398eec2ed820` finished successfully from source `faa2869`, using stable Xcode `26.4.1 / 17F6`, iOS SDK `26.4` and worker OS build `25E245`.
+- Exact `1.1 / 202609292030` IPA passed strict distribution-signature verification for all five bundles. Bundle versions, App Groups and privacy manifests agree; the main executable has Production iCloud, CloudDocuments and ubiquity-container entitlements.
+- Apple upload `6c176798-8c0a-4c29-8c77-3c74e571294f` was committed, but ingestion failed with `90626 Invalid Siri Support`: four intent descriptions and the Watch device enum used reserved `iPhone` names. It never became an ASC build or TestFlight-ready.
+- The current successor replaces only the rejected static metadata wording (and the SDK-27 counterpart); playback, identifiers, runtime dialogs and downloader behavior are unchanged. Build number is bumped to `202609292344` across the project and EAS config.
+- The new compiled App Intent gate checks the archived app and nested bundles before export. It reproduced all seven locations in the actually rejected IPA; source/compiled metadata and signing tests now total **32 passing**, alongside **7 widget integration tests**.
+
+Not yet verified for the metadata-fixed successor: fresh cloud archive/export, exact successor IPA, ASC `VALID`, external Beta App Review approval and usable public-group assignment. Prior binary validation is not transferred to the new candidate.
 
 ## Draft 1.1 release notes
 
