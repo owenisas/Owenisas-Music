@@ -103,8 +103,9 @@ build:
           # This TestFlight lane must retain the requested downloader.
           BIN="$APP/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
           strings "$BIN" > "$PWD/beta-binary-strings.txt"
-          grep -q 'Download Music' "$PWD/beta-binary-strings.txt"
-          grep -q 'youtubei/v1/player' "$PWD/beta-binary-strings.txt"
+          grep -q 'Paste a YouTube link or playlist URL' "$PWD/beta-binary-strings.txt" || { echo 'ERROR: Download screen missing'; exit 1; }
+          grep -q 'youtubei/v1/player' "$PWD/beta-binary-strings.txt" || { echo 'ERROR: Downloader endpoint missing'; exit 1; }
+          echo 'Verified Download Music screen and downloader endpoint in archived executable'
           /usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionAttributes:NSExtensionActivationRule' \
             "$APP/PlugIns/OwenisasShare.appex/Info.plist" | grep -qE 'public\.(url|plain-text)'
     - run:
