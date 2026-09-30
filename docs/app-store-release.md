@@ -73,6 +73,16 @@ Integrated simulator unit evidence: **338 passed, 0 failed, 2 skipped** (`build/
 
 Remaining release gates: Apple's external Beta App Review approval and subsequent public-link verification; expanded Island/native Lock Screen and physical Siri/Watch/iCloud runtime QA; exact-candidate App Store screenshots/metadata and any separately approved App Store submission.
 
+## Downloader-enabled TestFlight correction
+
+- Operator explicitly requires Download to remain in TestFlight. The previous `202609292344` upload used the import-only `APP_STORE` variant; source preservation did not preserve the feature in the binary. It remains waiting for external review and must not be described as downloader-enabled.
+- EAS `testflight` profile now uses `.eas/build/testflight-ios.yml`, production signing secrets, inherited extension flags without `APP_STORE`, and `OWENISAS_DISTRIBUTION=personal`. The separate App Store workflow is unchanged.
+- Stable SDK compile required guarding the SDK-27 background scheduler call with the same SDK availability discriminator used by MediaIntents; SDK 26 uses synchronous scheduling. The first correction cloud run exposed this compile error. The next archived successfully but a short-string binary marker failed: an optimized Swift probe confirmed short strings need not survive `strings`. The gate now uses the long Download-screen instruction and the downloader URL.
+- Successful EAS build: `c5520cd2-1535-4a52-9e2a-919c4db40e44`; pushed source `94a299f38f66de246b6d65588f37e144da9e0ea7`; version/build `1.1 / 202609300942`. Exact IPA SHA-256: `4a47a4b7559ac40479154c13cb0af5e722cc355a0b1d7c31a3198d862adbcdb4`.
+- Exact IPA verification proves Download-screen instruction and downloader endpoint in the executable, URL/text Share activation, all five valid signatures, matching versions, App Groups/privacy manifests, Production iCloud, and four compiled intent metadata bundles. These are binary-presence checks, not a fresh physical-device end-to-end download test. Release regression suite: **35 passing**.
+- ASC upload/build `3e05817a-98ba-41a1-9d9d-cbce0607525f` is ingestion `COMPLETE`, processing `VALID`, internal `IN_BETA_TESTING`. Updated test notes were read back. Exact build membership in the public external group was read back.
+- External review submission was attempted but Apple rejected it: another build in the same train is already in beta review. The new build remains `READY_FOR_BETA_SUBMISSION`, with no review submission. The older import-only build remains `WAITING_FOR_BETA_REVIEW`. Do not claim the new build is submitted or publicly available. No older build was expired and no review was canceled.
+
 ## Draft 1.1 release notes
 
 - Sync your songs, playlists, likes and listening history across devices with iCloud Drive.
