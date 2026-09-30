@@ -1574,6 +1574,7 @@ final class BackgroundDownloadActivity {
         continuedIdentifier = identifier
         let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: title, subtitle: subtitle)
         request.strategy = .fail
+        #if canImport(MediaIntents)
         if #available(iOS 27.0, *) {
             // The async submit must not run on the main thread.
             Task.detached { [weak self] in
@@ -1590,6 +1591,14 @@ final class BackgroundDownloadActivity {
                 submissionFailed(error)
             }
         }
+        #else
+        // Stable SDK 26 exposes the synchronous submit API only.
+        do {
+            try BGTaskScheduler.shared.submit(request)
+        } catch {
+            submissionFailed(error)
+        }
+        #endif
     }
 
     private func submissionFailed(_ error: Error) {
