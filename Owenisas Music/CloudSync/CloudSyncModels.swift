@@ -274,6 +274,49 @@ extension CloudSyncLocalState {
     }
 }
 
+// MARK: - User-facing transfer failures
+
+/// File copies into the ubiquity container can succeed before Apple's
+/// background upload fails. Keep those asynchronous failures visible too.
+enum CloudSyncFailure {
+    static func message(for error: Error) -> String {
+        var current = error as NSError
+        // Prefer the underlying cause, bounded for malformed error chains.
+        for _ in 0..<8 {
+            if let message = knownMessage(for: current) { return message }
+            guard let underlying = current.userInfo[NSUnderlyingErrorKey] as? NSError else { break }
+            current = underlying
+        }
+        return "iCloud sync failed: \(current.localizedDescription)"
+    }
+
+    private static func knownMessage(for error: NSError) -> String? {
+        if error.domain == NSCocoaErrorDomain {
+            switch error.code {
+            case NSUbiquitousFileNotUploadedDueToQuotaError:
+                return "iCloud storage is full. Free up iCloud space or increase your storage plan to resume sync. Your local songs are still on this device."
+            case NSFileWriteOutOfSpaceError:
+                return "Your device storage is full. Free up space on this device to resume sync."
+            case NSUbiquitousFileUbiquityServerNotAvailable:
+                return "iCloud is unavailable right now. Sync will retry automatically."
+            case NSUbiquitousFileUnavailableError:
+                return "An iCloud file is unavailable right now. Sync will retry automatically."
+            default: break
+            }
+        }
+        if error.domain == NSURLErrorDomain {
+            switch error.code {
+            case NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost:
+                return "iCloud sync needs an internet connection. Check your connection; sync will retry automatically."
+            case NSURLErrorTimedOut:
+                return "The iCloud transfer timed out. Check your connection; sync will retry automatically."
+            default: break
+            }
+        }
+        return nil
+    }
+}
+
 // MARK: - Status shown in Settings
 
 enum CloudSyncStatus: Equatable {

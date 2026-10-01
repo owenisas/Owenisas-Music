@@ -25,6 +25,7 @@ struct CloudGatherResult {
     var localFolders: [String: LocalSongFolder] = [:]
     var remoteFolders: [String: RemoteSongFolder] = [:]
     var remoteListingComplete = false
+    var transferErrors: [String] = []
 }
 
 struct MirrorExecutionResult: Equatable {
@@ -80,6 +81,7 @@ final class CloudFileMirror: @unchecked Sendable {
         let libraries = readLibraryFiles(ownDeviceID: ownDeviceID)
         result.libraries = libraries.files
         result.ownFileExists = libraries.ownFileExists
+        result.transferErrors = libraries.errors
         result.localFolders = scanLocalFolders()
         result.remoteFolders = remoteFolders(queryEntries: queryEntries)
         result.remoteListingComplete = remoteListingComplete
@@ -124,6 +126,7 @@ final class CloudFileMirror: @unchecked Sendable {
                 // A placeholder carries no creation date; keep the query's.
                 merged.createdAt = entry.createdAt ?? known.createdAt
                 merged.size = entry.size ?? known.size
+                merged.transferError = entry.transferError ?? known.transferError
             }
             folder.files[entry.name] = merged
             folders[key] = folder
@@ -141,7 +144,7 @@ final class CloudFileMirror: @unchecked Sendable {
         let keys: [URLResourceKey] = [
             .isDirectoryKey, .isRegularFileKey, .fileSizeKey, .creationDateKey, .isUbiquitousItemKey,
             .ubiquitousItemDownloadingStatusKey, .ubiquitousItemIsUploadedKey, .ubiquitousItemIsUploadingKey,
-            .ubiquitousItemIsDownloadingKey,
+            .ubiquitousItemIsDownloadingKey, .ubiquitousItemUploadingErrorKey, .ubiquitousItemDownloadingErrorKey,
         ]
         let folderKeys: Set<URLResourceKey> = [.isDirectoryKey, .creationDateKey]
         guard let folders = try? fm.contentsOfDirectory(at: remoteSongs, includingPropertiesForKeys: Array(folderKeys), options: []) else {
@@ -189,7 +192,8 @@ final class CloudFileMirror: @unchecked Sendable {
             isUploaded: ubiquitous ? (values.ubiquitousItemIsUploaded ?? false) : true,
             isUploading: ubiquitous ? (values.ubiquitousItemIsUploading ?? false) : false,
             isDownloading: ubiquitous ? (values.ubiquitousItemIsDownloading ?? false) : false,
-            createdAt: values.creationDate
+            createdAt: values.creationDate,
+            transferError: (values.ubiquitousItemUploadingError ?? values.ubiquitousItemDownloadingError).map { CloudSyncFailure.message(for: $0) }
         )
     }
 
@@ -223,7 +227,9 @@ final class CloudFileMirror: @unchecked Sendable {
                 isUploaded: flag(NSMetadataUbiquitousItemIsUploadedKey),
                 isUploading: flag(NSMetadataUbiquitousItemIsUploadingKey),
                 isDownloading: flag(NSMetadataUbiquitousItemIsDownloadingKey),
-                createdAt: item.value(forAttribute: NSMetadataItemFSCreationDateKey) as? Date
+                createdAt: item.value(forAttribute: NSMetadataItemFSCreationDateKey) as? Date,
+                transferError: ((item.value(forAttribute: NSMetadataUbiquitousItemUploadingErrorKey)
+                    ?? item.value(forAttribute: NSMetadataUbiquitousItemDownloadingErrorKey)) as? NSError).map { CloudSyncFailure.message(for: $0) }
             )
         }
     }
@@ -239,13 +245,14 @@ final class CloudFileMirror: @unchecked Sendable {
     struct LibraryReadResult {
         var files: [CloudLibraryFile] = []
         var ownFileExists = false
+        var errors: [String] = []
     }
 
     /// Reads other devices' files that changed since the last read. Files
     /// not on this device yet are asked to download and read next time.
     func readLibraryFiles(ownDeviceID: String) -> LibraryReadResult {
         var result = LibraryReadResult()
-        let keys: [URLResourceKey] = [.isRegularFileKey, .contentModificationDateKey, .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]
+        let keys: [URLResourceKey] = [.isRegularFileKey, .contentModificationDateKey, .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey, .ubiquitousItemUploadingErrorKey, .ubiquitousItemDownloadingErrorKey]
         guard let entries = try? fm.contentsOfDirectory(at: libraryDirectory, includingPropertiesForKeys: keys, options: []) else {
             return result
         }
@@ -262,11 +269,14 @@ final class CloudFileMirror: @unchecked Sendable {
             }
             guard name.hasSuffix(".json"), !name.hasPrefix(".") else { continue }
             let deviceID = String(name.dropLast(".json".count))
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            if let error = values?.ubiquitousItemUploadingError ?? values?.ubiquitousItemDownloadingError {
+                result.errors.append(CloudSyncFailure.message(for: error))
+            }
             if deviceID == ownDeviceID {
                 result.ownFileExists = true
                 continue
             }
-            let values = try? url.resourceValues(forKeys: Set(keys))
             guard values?.isRegularFile == true else { continue }
             if values?.isUbiquitousItem == true, let status = values?.ubiquitousItemDownloadingStatus, status != .current {
                 try? ops.startDownloading(url)
@@ -307,7 +317,7 @@ final class CloudFileMirror: @unchecked Sendable {
                 try removeRemoteFolder(name)
                 result.removedRemote.append(CloudSyncFiles.folderKey(name))
             } catch {
-                result.errors.append("Remove \(name) from iCloud: \(error.localizedDescription)")
+                result.errors.append("Remove \(name) from iCloud: \(CloudSyncFailure.message(for: error))")
             }
         }
 
@@ -323,7 +333,7 @@ final class CloudFileMirror: @unchecked Sendable {
                 }
                 evict(folder: name, files: nil)
             } catch {
-                result.errors.append("Download \(name): \(error.localizedDescription)")
+                result.errors.append("Download \(name): \(CloudSyncFailure.message(for: error))")
             }
         }
 
@@ -332,7 +342,7 @@ final class CloudFileMirror: @unchecked Sendable {
                 if try importFiles(transfer) > 0 { result.updatedFolders.append(transfer.local) }
                 evict(folder: transfer.remote, files: transfer.files)
             } catch {
-                result.errors.append("Download files for \(transfer.local): \(error.localizedDescription)")
+                result.errors.append("Download files for \(transfer.local): \(CloudSyncFailure.message(for: error))")
             }
         }
 
@@ -343,7 +353,7 @@ final class CloudFileMirror: @unchecked Sendable {
                 try uploadFolder(name)
                 result.uploadedFolders.append(CloudSyncFiles.folderKey(name))
             } catch {
-                result.errors.append("Upload \(name): \(error.localizedDescription)")
+                result.errors.append("Upload \(name): \(CloudSyncFailure.message(for: error))")
             }
         }
 
@@ -351,7 +361,7 @@ final class CloudFileMirror: @unchecked Sendable {
             do {
                 try upload(files: transfer.files, from: transfer.local, to: transfer.remote)
             } catch {
-                result.errors.append("Upload files for \(transfer.local): \(error.localizedDescription)")
+                result.errors.append("Upload files for \(transfer.local): \(CloudSyncFailure.message(for: error))")
             }
         }
 
@@ -361,7 +371,7 @@ final class CloudFileMirror: @unchecked Sendable {
                 do {
                     try ops.startDownloading(url)
                 } catch {
-                    result.errors.append("Start download \(folder)/\(file): \(error.localizedDescription)")
+                    result.errors.append("Start download \(folder)/\(file): \(CloudSyncFailure.message(for: error))")
                 }
             }
         }
@@ -519,7 +529,7 @@ final class CloudFileMirror: @unchecked Sendable {
             try fm.moveItem(at: source, to: destination)
             return true
         } catch {
-            print("[DEBUG] CloudSync: couldn't set aside \(folderName): \(error.localizedDescription)")
+            print("[DEBUG] CloudSync: couldn't set aside \(folderName): \(CloudSyncFailure.message(for: error))")
             return false
         }
     }

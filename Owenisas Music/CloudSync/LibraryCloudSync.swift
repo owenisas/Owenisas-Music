@@ -493,7 +493,7 @@ final class LibraryCloudSync: ObservableObject, @unchecked Sendable {
         let plan = engine.reconcile(gathered, snapshot: snapshot, now: now, allowDestructive: allowDestructive,
                                     protectedSongIDs: store.cloudProtectedSongIDs)
         var removed = Set<String>()
-        var applyErrors: [String] = []
+        var applyErrors: [String] = gathered.transferErrors
         if !plan.isEmpty {
             isApplying = true
             let applied = store.applyCloudPlan(plan) { id in
@@ -581,7 +581,7 @@ final class LibraryCloudSync: ObservableObject, @unchecked Sendable {
     func publishStatus(_ plan: MirrorPlan, errors: [String], mirrorResult: MirrorExecutionResult = .init()) {
         cloudSongCount = plan.songsInCloud
         cloudBytes = plan.bytesInCloud
-        if let error = (errors + mirrorResult.errors).first {
+        if let error = (errors + plan.transferErrors + mirrorResult.errors).first {
             status = .failed(error)
         } else if !queryGathered {
             status = .checking
@@ -593,11 +593,6 @@ final class LibraryCloudSync: ObservableObject, @unchecked Sendable {
     }
 
     private static func describe(_ error: Error) -> String {
-        let ns = error as NSError
-        if ns.domain == NSCocoaErrorDomain,
-           ns.code == NSFileWriteOutOfSpaceError || ns.code == NSUbiquitousFileUbiquityServerNotAvailable {
-            return ns.code == NSFileWriteOutOfSpaceError ? "iCloud storage is full" : "iCloud is unavailable right now"
-        }
-        return "iCloud sync error: \(ns.localizedDescription)"
+        CloudSyncFailure.message(for: error)
     }
 }

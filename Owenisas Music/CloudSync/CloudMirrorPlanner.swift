@@ -26,6 +26,7 @@ struct RemoteFileEntry: Equatable {
     var isUploading: Bool
     var isDownloading: Bool
     var createdAt: Date?
+    var transferError: String? = nil
 }
 
 struct RemoteSongFolder: Equatable {
@@ -85,6 +86,7 @@ struct MirrorPlan: Equatable {
     var downloadingCount = 0
     var songsInCloud = 0
     var bytesInCloud: Int64 = 0
+    var transferErrors: [String] = []
 
     var hasFileWork: Bool {
         !uploadFolders.isEmpty || !uploadFiles.isEmpty || !importFolders.isEmpty || !importFiles.isEmpty
@@ -99,6 +101,7 @@ enum CloudMirrorPlanner {
 
     static func plan(_ input: MirrorPlanInput) -> MirrorPlan {
         var plan = MirrorPlan()
+        plan.transferErrors = Array(Set(input.remote.values.flatMap { $0.files.values.compactMap(\.transferError) })).sorted()
 
         for remote in input.remote.values where remote.hasAudio {
             plan.songsInCloud += 1

@@ -83,6 +83,13 @@ Remaining release gates: Apple's external Beta App Review approval and subsequen
 - ASC upload/build `3e05817a-98ba-41a1-9d9d-cbce0607525f` is ingestion `COMPLETE`, processing `VALID`, internal `IN_BETA_TESTING`. Updated test notes were read back. Exact build membership in the public external group was read back.
 - External review submission was attempted but Apple rejected it: another build in the same train is already in beta review. The new build remains `READY_FOR_BETA_SUBMISSION`, with no review submission. The older import-only build remains `WAITING_FOR_BETA_REVIEW`. Do not claim the new build is submitted or publicly available. No older build was expired and no review was canceled.
 
+## iCloud transfer-error reporting follow-up
+
+- The connected iPhone 13 mini has `1.1 / 202609300942`, 91 local song folders, 91 songs in sync state, and 91 mirrored-folder entries. Mirrored means copied to/seen in the local ubiquity container, not server-confirmed upload. No library or sync reset was performed; full iCloud quota on this device is not yet confirmed.
+- Local source now reads Apple's asynchronous upload/download errors from URL resource values and metadata-query results, preserves query errors during directory refresh, and propagates song and library-JSON transfer failures to the existing Settings status. Quota, local-device storage, connectivity, timeouts, unavailable service/files and unknown errors have explicit messages. Local storage exhaustion is no longer mislabeled as full iCloud storage.
+- Nine new transfer-error tests passed. Full simulator unit suite: **347 passed, 0 failed, 2 skipped** (349 logical tests; 367 passing invocations including parameterized cases), result `build/final-integrated-derived/Logs/Test/Test-Owenisas Music-2026.09.30_20-21-03--0700.xcresult`. Existing Siri test audio-session runtime warnings were emitted. `git diff --check` passed.
+- These source changes are not yet in a new TestFlight binary or installed on the phone. Device daemon logs remain unavailable without operator-local administrator authentication; do not attribute the existing stall to quota until confirmed.
+
 ## Draft 1.1 release notes
 
 - Sync your songs, playlists, likes and listening history across devices with iCloud Drive.
